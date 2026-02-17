@@ -7,7 +7,6 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 mod loaders;
 use crate::loaders::pos::ProviderOfServicesLoader;
-use common::traits::CmsDataLoader;
 use std::path::Path;
 
 #[derive(Parser, Debug)]
@@ -37,9 +36,7 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!("../migrations").run(&state.pool).await?;
     info!("Migrations completed successfully.");
 
-    let _state = state; // Keep state alive if needed later, though used above
-
-    let loader = ProviderOfServicesLoader;
+    let mut engine = common::engine::LoaderEngine::new(state.pool.clone()).await?;
     let data_dir = Path::new("data");
 
     // Ensure data directory exists
@@ -47,27 +44,11 @@ async fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(data_dir)?;
     }
 
-    info!("Starting load for key: {}", loader.key());
-    let result = loader.load(data_dir)?;
-    let (providers, addresses) = result.data;
+    info!("Registering loaders...");
+    engine.register(Box::new(ProviderOfServicesLoader));
 
-    if let common::traits::FileHash::Sha256(hash) = result.metadata.file_hash {
-        info!("Metadata File Hash: {}", hash);
-    }
-
-    info!(
-        "Successfully loaded {} providers and {} addresses.",
-        providers.len(),
-        addresses.len()
-    );
-
-    // Print a sample to verify fields are populated
-    if let Some(p) = providers.first() {
-        info!("Sample Provider: {:?}", p);
-    }
-    if let Some(a) = addresses.first() {
-        info!("Sample Address: {:?}", a);
-    }
+    info!("Running engine...");
+    engine.run(data_dir).await?;
 
     Ok(())
 }

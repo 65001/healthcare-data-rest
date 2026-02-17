@@ -25,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
 
     info!("Initializing application state...");
-    let state = AppState::new(args.postgres).await?;
+    let _state = AppState::new(args.postgres).await?;
 
     info!("Backend started successfully with DB connection pool.");
 

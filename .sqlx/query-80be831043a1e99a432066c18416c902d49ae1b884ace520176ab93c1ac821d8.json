@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT loader_key, version, file_hash FROM loader_runs",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "loader_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "version",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "file_hash",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "80be831043a1e99a432066c18416c902d49ae1b884ace520176ab93c1ac821d8"
+}

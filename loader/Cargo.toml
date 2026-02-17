@@ -18,3 +18,4 @@ clap = { version = "4.5", features = ["derive", "env"] }
 dotenvy = "0.15"
 tokio = { version = "1.0", features = ["full"] }
 sqlx = { version = "0.8", features = ["macros", "migrate", "postgres", "runtime-tokio-rustls", "chrono", "uuid"] }
+async-trait = "0.1.89"

@@ -11,3 +11,4 @@ anyhow = "1.0"
 tracing = "0.1"
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid"] }
 clap = { version = "4.5", features = ["derive", "env"] }
+async-trait = "0.1.89"
