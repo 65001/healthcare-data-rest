@@ -1,5 +1,15 @@
-use std::path::Path;
 use anyhow::Result;
+use std::path::Path;
+
+pub struct CmsMetadata {
+    pub file_hash: String,
+    pub result_hash: String,
+}
+
+pub struct CmsDataResult<T> {
+    pub data: T,
+    pub metadata: CmsMetadata,
+}
 
 /// Trait for defining a loader for a specific CMS dataset.
 pub trait CmsDataLoader {
@@ -14,8 +24,8 @@ pub trait CmsDataLoader {
     fn url(&self) -> &str;
 
     /// Orchestrates the loading process: download, extract, and parse.
-    /// 
+    ///
     /// # Arguments
     /// * `data_dir` - The directory where raw files should be stored/cached.
-    fn load(&self, data_dir: &Path) -> Result<Self::Output>;
+    fn load(&self, data_dir: &Path) -> Result<CmsDataResult<Self::Output>>;
 }

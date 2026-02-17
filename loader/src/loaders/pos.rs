@@ -5,6 +5,7 @@ use csv::ReaderBuilder;
 use std::fs::File;
 use std::io::Cursor;
 use std::path::Path;
+use tracing::{error, info};
 
 pub struct ProviderOfServicesLoader;
 
@@ -24,17 +25,17 @@ impl CmsDataLoader for ProviderOfServicesLoader {
 
         // 1. Download if not exists
         if !zip_path.exists() {
-            println!("Downloading POS data to {:?}...", zip_path);
+            info!("Downloading POS data to {:?}...", zip_path);
             let response = reqwest::blocking::get(self.url())?.error_for_status()?;
             let bytes = response.bytes()?;
             let mut file = File::create(&zip_path)?;
             std::io::copy(&mut Cursor::new(bytes), &mut file)?;
         } else {
-            println!("Using existing POS zip at {:?}", zip_path);
+            info!("Using existing POS zip at {:?}", zip_path);
         }
 
         // 2. Extract and Find CSV
-        println!("Extracting zip...");
+        info!("Extracting zip...");
         let file = File::open(&zip_path)?;
         let mut archive = zip::ZipArchive::new(file)?;
 
@@ -53,7 +54,7 @@ impl CmsDataLoader for ProviderOfServicesLoader {
             return Err(anyhow::anyhow!("No suitable CSV found in zip archive"));
         }
 
-        println!("Found CSV: {}", csv_file_name);
+        info!("Found CSV: {}", csv_file_name);
 
         // Extract strictly the CSV file
         let mut csv_file_in_zip = archive.by_name(&csv_file_name)?;
@@ -67,7 +68,7 @@ impl CmsDataLoader for ProviderOfServicesLoader {
         std::io::copy(&mut csv_file_in_zip, &mut outfile)?;
 
         // 3. Parse CSV
-        println!("Parsing CSV from {:?}...", extracted_csv_path);
+        info!("Parsing CSV from {:?}...", extracted_csv_path);
         let mut rdr = ReaderBuilder::new()
             .has_headers(true)
             .from_path(&extracted_csv_path)?;
@@ -77,7 +78,7 @@ impl CmsDataLoader for ProviderOfServicesLoader {
 
         for result in rdr.deserialize() {
             let row: common::model::ProviderOfServiceRow = result.map_err(|e| {
-                eprintln!("Error parsing record: {}", e);
+                error!("Error parsing record: {}", e);
                 e
             })?;
 
