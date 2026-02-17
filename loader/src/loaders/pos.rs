@@ -1,9 +1,10 @@
 use anyhow::Result;
 use common::model::{Address, Provider};
-use common::traits::CmsDataLoader;
+use common::traits::{CmsDataLoader, CmsDataResult, CmsMetadata, FileHash};
 use csv::ReaderBuilder;
+use sha2::{Digest, Sha256};
 use std::fs::File;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::path::Path;
 use tracing::{error, info};
 
@@ -20,7 +21,11 @@ impl CmsDataLoader for ProviderOfServicesLoader {
         "https://data.cms.gov/sites/default/files/dataset_zips/741d954b3c14b2299052175b44e895f4/Provider%20of%20Services%20File%20-%20Internet%20Quality%20Improvement%20and%20Evaluation%20System.zip"
     }
 
-    fn load(&self, data_dir: &Path) -> Result<Self::Output> {
+    fn version(&self) -> usize {
+        1
+    }
+
+    fn load(&self, data_dir: &Path) -> Result<CmsDataResult<Self::Output>> {
         let zip_path = data_dir.join(format!("{}.zip", self.key()));
 
         // 1. Download if not exists
@@ -33,6 +38,22 @@ impl CmsDataLoader for ProviderOfServicesLoader {
         } else {
             info!("Using existing POS zip at {:?}", zip_path);
         }
+
+        // Calculate file hash
+        let mut file = File::open(&zip_path)?;
+        let mut hasher = Sha256::new();
+
+        let mut buffer = [0; 1024];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hasher.update(&buffer[..count]);
+        }
+        let hash_result = hasher.finalize();
+        let file_hash_string = hex::encode(hash_result);
+        info!("File hash (SHA256): {}", file_hash_string);
 
         // 2. Extract and Find CSV
         info!("Extracting zip...");
@@ -89,6 +110,11 @@ impl CmsDataLoader for ProviderOfServicesLoader {
             addresses.push(address);
         }
 
-        Ok((providers, addresses))
+        Ok(CmsDataResult {
+            data: (providers, addresses),
+            metadata: CmsMetadata {
+                file_hash: FileHash::Sha256(file_hash_string),
+            },
+        })
     }
 }

@@ -1,9 +1,15 @@
 use anyhow::Result;
 use std::path::Path;
 
+pub enum FileHash {
+    Sha256(String),
+    Sha512(String),
+    Md5(String),
+    RustHasher(String),
+}
+
 pub struct CmsMetadata {
-    pub file_hash: String,
-    pub result_hash: String,
+    pub file_hash: FileHash,
 }
 
 pub struct CmsDataResult<T> {
@@ -22,6 +28,11 @@ pub trait CmsDataLoader {
 
     /// The source URL for the dataset.
     fn url(&self) -> &str;
+
+    /// The version of the plugin
+    /// Each time the *logic* of the plugin changes, this version should be incremented.
+    /// This forces an update to the db, even if the file hash is the same.
+    fn version(&self) -> usize;
 
     /// Orchestrates the loading process: download, extract, and parse.
     ///
