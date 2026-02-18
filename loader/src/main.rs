@@ -5,9 +5,11 @@ use dotenvy::dotenv;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
 
+mod engine;
 mod loaders;
-use crate::loaders::pos::ProviderOfServicesLoader;
-use std::path::Path;
+mod traits;
+
+use crate::loaders::cms_hospital::CmsHospitalLoader;
 
 #[derive(Parser, Debug)]
 struct Cli {
@@ -36,19 +38,14 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!("../migrations").run(&state.pool).await?;
     info!("Migrations completed successfully.");
 
-    let mut engine = common::engine::LoaderEngine::new(state.pool.clone()).await?;
-    let data_dir = Path::new("data");
-
-    // Ensure data directory exists
-    if !data_dir.exists() {
-        std::fs::create_dir_all(data_dir)?;
-    }
+    // Use local LoaderEngine
+    let mut engine = engine::LoaderEngine::new(state.pool.clone()).await?;
 
     info!("Registering loaders...");
-    engine.register(Box::new(ProviderOfServicesLoader));
+    engine.register(Box::new(CmsHospitalLoader));
 
     info!("Running engine...");
-    engine.run(data_dir).await?;
+    engine.run().await?; // No data_dir argument needed for now
 
     Ok(())
 }
