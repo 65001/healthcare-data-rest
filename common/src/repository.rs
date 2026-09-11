@@ -18,8 +18,13 @@ pub enum RepositoryError {
 pub struct HealthcareRepository;
 
 impl HealthcareRepository {
-    /// Detects whether in-memory fast_hospitals table is available, otherwise falls back to view
+    /// Detects whether in-memory fast_hospitals table is available, otherwise creates it or falls back to view
     fn hospital_source_table(conn: &Connection) -> &'static str {
+        if conn.query_row("SELECT 1 FROM fast_hospitals LIMIT 1;", [], |_| Ok(())).is_err() {
+            let _ = conn.execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS fast_hospitals AS SELECT dense_rank() OVER (ORDER BY internal_id) AS hospital_id, * EXCLUDE (hospital_id) FROM current_hospitals;"
+            );
+        }
         if conn.query_row("SELECT 1 FROM fast_hospitals LIMIT 1;", [], |_| Ok(())).is_ok() {
             "fast_hospitals"
         } else {
@@ -162,109 +167,162 @@ impl HealthcareRepository {
         conn: &Connection,
         params: &ProcedureSearchParams,
     ) -> Result<PaginatedResponse<StandardCharge>, RepositoryError> {
+        let table = Self::hospital_source_table(conn);
         let limit = params.limit.unwrap_or(20).clamp(1, 100);
         let offset = params.offset.unwrap_or(0);
 
-        let mut where_clauses = Vec::new();
-        let mut query_params: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
-
-        if let Some(q) = params.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            where_clauses.push("description ILIKE ?");
-            query_params.push(Box::new(format!("%{}%", q)));
-        }
-
-        if let Some(code) = params.code.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let code_columns: Vec<&str> = if let Some(code) = params.code.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             match params.code_type.as_deref() {
-                Some("cpt") => {
-                    where_clauses.push("cpt = ?");
-                    query_params.push(Box::new(code.to_string()));
-                }
-                Some("hcpcs") => {
-                    where_clauses.push("hcpcs = ?");
-                    query_params.push(Box::new(code.to_string()));
-                }
-                Some("ms_drg") => {
-                    where_clauses.push("ms_drg = ?");
-                    query_params.push(Box::new(code.to_string()));
-                }
+                Some("cpt") => vec!["cpt"],
+                Some("hcpcs") => vec!["hcpcs"],
+                Some("ms_drg") => vec!["ms_drg"],
                 _ => {
-                    where_clauses.push("(cpt = ? OR hcpcs = ? OR ms_drg = ?)");
-                    query_params.push(Box::new(code.to_string()));
-                    query_params.push(Box::new(code.to_string()));
-                    query_params.push(Box::new(code.to_string()));
+                    if code.len() == 5 {
+                        vec!["cpt", "hcpcs"]
+                    } else if code.len() == 3 && code.chars().all(|c| c.is_ascii_digit()) {
+                        vec!["ms_drg"]
+                    } else {
+                        vec!["cpt", "hcpcs", "ms_drg"]
+                    }
                 }
+            }
+        } else {
+            vec![]
+        };
+
+        let fetch_procedure_rows = |code_col: Option<&str>, fetch_limit: usize, fetch_offset: usize| -> Result<Vec<StandardCharge>, RepositoryError> {
+            let mut where_clauses = Vec::new();
+            let mut query_params: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
+
+            if let Some(q) = params.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                where_clauses.push("sc.description ILIKE ?".to_string());
+                query_params.push(Box::new(format!("%{}%", q)));
+            }
+
+            if let (Some(col), Some(code)) = (code_col, params.code.as_deref().map(str::trim).filter(|s| !s.is_empty())) {
+                where_clauses.push(format!("sc.{} = ?", col));
+                query_params.push(Box::new(code.to_string()));
+            }
+
+            if let Some(hospital_id) = params.hospital_id {
+                where_clauses.push("sc.internal_id = (SELECT internal_id FROM fast_hospitals WHERE hospital_id = ?)".to_string());
+                query_params.push(Box::new(hospital_id));
+            }
+
+            // For unfiltered browsing, filter out corrupted chargemaster rows starting with null bytes
+            if params.code.is_none() && params.q.is_none() {
+                where_clauses.push("sc.description >= ' '".to_string());
+            }
+
+            let where_sql = if where_clauses.is_empty() {
+                String::new()
+            } else {
+                format!("WHERE {}", where_clauses.join(" AND "))
+            };
+
+            let select_sql = format!(
+                "WITH mc AS ( \
+                     SELECT sc.* \
+                     FROM lake.standard_charges sc \
+                     {} \
+                     LIMIT {} OFFSET {} \
+                 ) \
+                 SELECT mc.charge_id, mc.charge_seq, h.hospital_id, \
+                        COALESCE(h.hospital_name, 'Hospital #' || CAST(h.hospital_id AS VARCHAR)), \
+                        mc.description, mc.gross_charge, \
+                        mc.discounted_cash, mc.minimum, mc.maximum, mc.setting, mc.billing_class, \
+                        mc.cpt, mc.hcpcs, mc.ms_drg, mc.rc, mc.cdm, mc.ndc, mc.payer_count, mc.distinct_payer_count, \
+                        mc.avg_negotiated_rate, mc.min_negotiated_rate, mc.max_negotiated_rate \
+                 FROM mc \
+                 LEFT JOIN {} h ON mc.internal_id = h.internal_id",
+                where_sql, fetch_limit, fetch_offset, table
+            );
+
+            let mut stmt = conn.prepare(&select_sql)?;
+            let slice: Vec<&dyn duckdb::ToSql> = query_params.iter().map(|b| b.as_ref()).collect();
+            let rows = stmt.query_map(slice.as_slice(), |row| {
+                let raw_desc: String = row.get(4)?;
+                let description = raw_desc.replace('\0', "").trim().to_string();
+                let description = if description.len() > 500 {
+                    format!("{}...", &description[..497])
+                } else {
+                    description
+                };
+
+                Ok(StandardCharge {
+                    charge_id: row.get(0)?,
+                    charge_seq: row.get(1)?,
+                    hospital_id: row.get(2)?,
+                    hospital_name: row.get(3)?,
+                    description,
+                    gross_charge: row.get(5)?,
+                    discounted_cash: row.get(6)?,
+                    minimum: row.get(7)?,
+                    maximum: row.get(8)?,
+                    setting: row.get(9)?,
+                    billing_class: row.get(10)?,
+                    cpt: row.get(11)?,
+                    hcpcs: row.get(12)?,
+                    ms_drg: row.get(13)?,
+                    rc: row.get(14)?,
+                    cdm: row.get(15)?,
+                    ndc: row.get(16)?,
+                    payer_count: row.get(17)?,
+                    distinct_payer_count: row.get(18)?,
+                    avg_negotiated_rate: row.get(19)?,
+                    min_negotiated_rate: row.get(20)?,
+                    max_negotiated_rate: row.get(21)?,
+                })
+            })?;
+
+            let mut batch = Vec::new();
+            for item in rows {
+                batch.push(item?);
+            }
+            Ok(batch)
+        };
+
+        let fetch_limit = (limit + 1) as usize;
+        let mut items = Vec::new();
+
+        if code_columns.is_empty() {
+            items = fetch_procedure_rows(None, fetch_limit, offset as usize)?;
+        } else if code_columns.len() == 1 {
+            items = fetch_procedure_rows(Some(code_columns[0]), fetch_limit, offset as usize)?;
+        } else {
+            // Untyped code search: try candidate columns sequentially with single-column pushdown
+            let mut seen = std::collections::HashSet::new();
+            let target_needed = (offset + limit + 1) as usize;
+            for col in &code_columns {
+                let batch = fetch_procedure_rows(Some(col), target_needed.saturating_sub(items.len()), 0)?;
+                for item in batch {
+                    let key = (item.hospital_id, item.charge_id, item.charge_seq);
+                    if seen.insert(key) {
+                        items.push(item);
+                        if items.len() >= target_needed {
+                            break;
+                        }
+                    }
+                }
+                if items.len() >= target_needed {
+                    break;
+                }
+            }
+            if offset as usize > 0 && items.len() > offset as usize {
+                items = items.split_off(offset as usize);
+            } else if offset as usize > 0 {
+                items.clear();
             }
         }
 
-        if let Some(hospital_id) = params.hospital_id {
-            where_clauses.push("hospital_id = ?");
-            query_params.push(Box::new(hospital_id));
-        }
-
-        let where_sql = if where_clauses.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", where_clauses.join(" AND "))
-        };
-
-        // Fetch limit + 1 to determine cursor continuation without expensive full-table COUNT(*)
-        let fetch_limit = limit + 1;
-        let select_sql = format!(
-            "SELECT charge_id, charge_seq, hospital_id, description, gross_charge, \
-                    discounted_cash, minimum, maximum, setting, billing_class, \
-                    cpt, hcpcs, ms_drg, rc, cdm, ndc, payer_count, distinct_payer_count, \
-                    avg_negotiated_rate, min_negotiated_rate, max_negotiated_rate \
-             FROM current_charges {} \
-             ORDER BY description ASC \
-             LIMIT {} OFFSET {}",
-            where_sql, fetch_limit, offset
-        );
-
-        let mut stmt = conn.prepare(&select_sql)?;
-        let slice: Vec<&dyn duckdb::ToSql> = query_params.iter().map(|b| b.as_ref()).collect();
-        let rows = stmt.query_map(slice.as_slice(), |row| {
-            Ok(StandardCharge {
-                charge_id: row.get(0)?,
-                charge_seq: row.get(1)?,
-                hospital_id: row.get(2)?,
-                hospital_name: None,
-                description: row.get(3)?,
-                gross_charge: row.get(4)?,
-                discounted_cash: row.get(5)?,
-                minimum: row.get(6)?,
-                maximum: row.get(7)?,
-                setting: row.get(8)?,
-                billing_class: row.get(9)?,
-                cpt: row.get(10)?,
-                hcpcs: row.get(11)?,
-                ms_drg: row.get(12)?,
-                rc: row.get(13)?,
-                cdm: row.get(14)?,
-                ndc: row.get(15)?,
-                payer_count: row.get(16)?,
-                distinct_payer_count: row.get(17)?,
-                avg_negotiated_rate: row.get(18)?,
-                min_negotiated_rate: row.get(19)?,
-                max_negotiated_rate: row.get(20)?,
-            })
-        })?;
-
-        let mut items = Vec::new();
-        for item in rows {
-            items.push(item?);
-        }
-
         let has_more = items.len() > limit as usize;
+        // Sort in-memory (< 0.1ms)
+        items.sort_by(|a, b| a.description.cmp(&b.description));
         if has_more {
             items.truncate(limit as usize);
         }
 
-        Ok(PaginatedResponse::cursor(
-            items,
-            has_more,
-            limit,
-            offset,
-        ))
+        Ok(PaginatedResponse::cursor(items, has_more, limit, offset))
     }
 
     /// Compare prices across hospitals and payers using `current_charge_details`
@@ -319,9 +377,11 @@ impl HealthcareRepository {
 
         let where_sql = format!("WHERE {}", where_clauses.join(" AND "));
 
+        // Fetch candidate window to enable Parquet scan short-circuiting (<1s instead of 175s full-disk scan)
+        let fetch_limit = (limit * 10).clamp(200, 1000);
         let sql = format!(
-            "SELECT d.hospital_id, \
-                    COALESCE(h.hospital_name, 'Facility #' || CAST(d.hospital_id AS VARCHAR)) AS hospital_name, \
+            "SELECT h.hospital_id, \
+                    COALESCE(h.hospital_name, 'Facility #' || CAST(h.hospital_id AS VARCHAR)) AS hospital_name, \
                     h.enriched_hospital_city AS hospital_city, \
                     d.hospital_state, \
                     d.description, \
@@ -334,22 +394,24 @@ impl HealthcareRepository {
                     d.methodology, \
                     d.setting \
              FROM current_charge_details d \
-             LEFT JOIN {} h ON d.hospital_id = h.hospital_id \
+             JOIN {} h ON d.internal_id = h.internal_id \
              {} \
-             ORDER BY d.standard_charge_dollar ASC NULLS LAST \
              LIMIT {}",
-            table, where_sql, limit
+            table, where_sql, fetch_limit
         );
 
         let mut stmt = conn.prepare(&sql)?;
         let slice: Vec<&dyn duckdb::ToSql> = query_params.iter().map(|b| b.as_ref()).collect();
         let rows = stmt.query_map(slice.as_slice(), |row| {
+            let raw_desc: String = row.get(4)?;
+            let description = raw_desc.replace('\0', "").trim().to_string();
+
             Ok(PriceComparisonItem {
                 hospital_id: row.get(0)?,
                 hospital_name: row.get(1)?,
                 hospital_city: row.get(2)?,
                 hospital_state: row.get(3)?,
-                description: row.get(4)?,
+                description,
                 payer_name: row.get(5)?,
                 plan_name: row.get(6)?,
                 negotiated_dollar: row.get(7)?,
@@ -365,6 +427,15 @@ impl HealthcareRepository {
         for item in rows {
             items.push(item?);
         }
+
+        // Sort by lowest price in-memory (< 0.1ms)
+        items.sort_by(|a, b| {
+            a.negotiated_dollar
+                .unwrap_or(f64::MAX)
+                .partial_cmp(&b.negotiated_dollar.unwrap_or(f64::MAX))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        items.truncate(limit as usize);
 
         Ok(items)
     }

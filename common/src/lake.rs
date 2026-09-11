@@ -41,8 +41,11 @@ impl DuckLakeConnectionManager {
     }
 
     fn initialize_connection(&self, conn: &Connection) -> Result<(), DuckDbError> {
-        // Optimize connection for analytical read queries
-        let _ = conn.execute_batch("SET threads TO 4; SET enable_progress_bar = false;");
+        // Optimize connection for analytical read queries using all available CPU threads
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get().clamp(4, 16))
+            .unwrap_or(8);
+        let _ = conn.execute_batch(&format!("SET threads TO {}; SET enable_progress_bar = false;", threads));
 
         if self.config.load_ducklake_extension {
             // First try loading without network round-trip; install only if not found
@@ -65,9 +68,9 @@ impl DuckLakeConnectionManager {
                     match conn.execute_batch(&attach_sql) {
                         Ok(_) => {
                             info!("Attached DuckLake catalog 'lake' from {}", lake_str);
-                            // Pre-materialize the small 7,916 hospital table in-memory for sub-millisecond searches
+                            // Pre-materialize the small 7,916 hospital table in-memory with unique surrogate hospital_id for sub-millisecond searches
                             let _ = conn.execute_batch(
-                                "CREATE TEMP TABLE IF NOT EXISTS fast_hospitals AS SELECT * FROM current_hospitals;"
+                                "CREATE TEMP TABLE IF NOT EXISTS fast_hospitals AS SELECT dense_rank() OVER (ORDER BY internal_id) AS hospital_id, * EXCLUDE (hospital_id) FROM current_hospitals;"
                             );
                         }
                         Err(e) => warn!("Failed to attach DuckLake catalog: {}", e),

@@ -136,14 +136,17 @@ fn test_real_extracted_lake_queries() {
     )
     .expect("Compare procedure prices");
     println!("Price comparisons for CPT 99213 in MA (count: {}):", compare_res.len());
+    assert!(!compare_res.is_empty(), "Must find CPT 99213 records in MA");
     for item in &compare_res {
         println!(
-            "  - {}: Payer: {} ({:?}) => ${:?} (Cash: ${:?})",
+            "  - {} ({}): Payer: {} ({:?}) => ${:?} (Cash: ${:?})",
             item.hospital_name,
+            item.hospital_state.as_deref().unwrap_or(""),
             item.payer_name.as_deref().unwrap_or("Unknown"),
             item.plan_name.as_deref().unwrap_or(""),
             item.negotiated_dollar,
             item.discounted_cash
         );
+        assert_eq!(item.hospital_state.as_deref(), Some("MA"), "Returned items must strictly match the selected state");
     }
 }
