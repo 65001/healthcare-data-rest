@@ -13,6 +13,14 @@ target/
 *.xlsx
 *.csv
 *.zip
+*.parquet
+
+# DuckDB and DuckLake database files & data lake directory
+*.duckdb
+*.duckdb.wal
+*.duckdb.tmp*
+*.ducklake
+lake/
 
 # Environment variables
 .env

@@ -5,6 +5,7 @@ use dotenvy::dotenv;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
 
+mod cms;
 mod engine;
 mod loaders;
 mod traits;

@@ -1,20 +1,13 @@
-use crate::args::PostgresSqlArguments;
-use anyhow::Result;
-use sqlx::postgres::{PgPool, PgPoolOptions};
+use crate::lake::{DuckLakeConfig, DuckLakePool, create_lake_pool};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AppState {
-    pub pool: PgPool,
+    pub pool: DuckLakePool,
 }
 
 impl AppState {
-    pub async fn new(args: PostgresSqlArguments) -> Result<Self> {
-        let connection_string = args.get_connection_string();
-        let pool = PgPoolOptions::new()
-            .max_connections(args.max_connections)
-            .connect(&connection_string)
-            .await?;
-
+    pub fn new(config: DuckLakeConfig) -> Result<Self, r2d2::Error> {
+        let pool = create_lake_pool(config)?;
         Ok(Self { pool })
     }
 }

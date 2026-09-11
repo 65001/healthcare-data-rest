@@ -1,14 +1,12 @@
-use crate::traits::CmsDataLoader;
+use crate::traits::Plugin;
 use anyhow::Result;
-use chromiumoxide::{Browser, BrowserConfig};
-use futures::StreamExt;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use tracing::info;
 
 pub struct LoaderEngine {
     pool: PgPool,
-    registry: HashMap<String, Box<dyn CmsDataLoader + Send + Sync>>,
+    registry: HashMap<String, Box<dyn Plugin + Send + Sync>>,
 }
 
 impl LoaderEngine {
@@ -19,28 +17,13 @@ impl LoaderEngine {
         })
     }
 
-    pub fn register(&mut self, loader: Box<dyn CmsDataLoader + Send + Sync>) {
+    pub fn register(&mut self, loader: Box<dyn Plugin + Send + Sync>) {
         let key = loader.key().to_string();
         self.registry.insert(key, loader);
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        info!("Initializing Chromium browser...");
-        let (mut browser, mut handler) = Browser::launch(
-            BrowserConfig::builder()
-                .build()
-                .map_err(|e| anyhow::anyhow!(e))?,
-        )
-        .await?;
-
-        // Spawn the handler thread
-        let handle = tokio::task::spawn(async move {
-            while let Some(h) = handler.next().await {
-                if h.is_err() {
-                    break;
-                }
-            }
-        });
+        info!("Starting loader engine...");
 
         // Collect keys
         let keys: Vec<String> = self.registry.keys().cloned().collect();
@@ -49,24 +32,17 @@ impl LoaderEngine {
             info!("Processing loader: {}", key);
             let loader = self.registry.get(&key).unwrap();
 
-            info!("Navigating to {}", loader.url());
-            let page = browser.new_page(loader.url()).await?;
-
             info!("Checking for updates...");
-            if let Some(date) = loader.check_update(&page).await? {
+            if let Some(date) = loader.check_update().await? {
                 info!("Found data version: {}", date);
                 // Here we would check against DB, but for now we just load
-                loader.load(&page, &self.pool).await?;
+                loader.load(&self.pool).await?;
             } else {
                 info!("No date found or update check failed.");
             }
-
-            page.close().await?;
         }
 
-        browser.close().await?;
-        handle.await?;
-
+        info!("Loader engine run complete.");
         Ok(())
     }
 }
