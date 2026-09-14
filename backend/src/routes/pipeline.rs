@@ -6,29 +6,51 @@
 //! sequence and `cms-hpt.txt` parser remain scaffolds (see
 //! IMPLEMENTATION_NOTES.md).
 //!
-//! `enrich`'s cascade is `[nominatim]` only in this pass — Census and
-//! Google Maps geocoding are still stubs, so they're deliberately left
-//! out rather than added and immediately erroring (or silently
-//! no-op'ing) on every hospital. Website discovery runs Nominatim's
-//! opportunistic `extratags.website` first and falls back to Google
-//! Places only when that's empty — both to save the Places API's
-//! per-call cost and because that's the priority order the project owner
-//! chose. See `geo-enrich/src/enricher.rs`.
+//! `enrich`'s cascade is `[census, nominatim, google_maps]`, each gated
+//! by its own `GEOCODING_*_ENABLED` flag — Census first (free, generally
+//! the best first-try hit rate), Nominatim second (free, 1 req/sec,
+//! opportunistically also finds a website), Google Maps last (paid, off
+//! by default, for the handful of addresses neither free provider can
+//! resolve). Website discovery runs a geocode provider's opportunistic
+//! find first (currently only Nominatim's `extratags.website`) and falls
+//! back to Google Places only when that's empty — both to save the
+//! Places API's per-call cost and because that's the priority order the
+//! project owner chose. See `geo-enrich/src/enricher.rs`.
+//!
+//! `?retry_incomplete=true` on `POST /api/pipeline/enrich` opts into a
+//! backfill pass: alongside the normal `enriched_at IS NULL` hospitals,
+//! it also re-picks-up hospitals that already ran once but are still
+//! missing coordinates or a website (see `EnrichQuery` and
+//! `db::queries::list_unenriched_hospitals`'s doc comment for why this
+//! is opt-in, not the default).
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
+use serde::Deserialize;
 
 use geo_enrich::enricher::EnrichmentConfig;
-use geo_enrich::providers::{GooglePlacesClient, NominatimProvider};
+use geo_enrich::providers::{CensusProvider, GoogleMapsProvider, GooglePlacesClient, NominatimProvider};
 use geo_enrich::{CascadingGeocoder, GeocodingProvider};
 
 use crate::enrich_store::HospitalStore;
 use crate::error::ApiError;
 use crate::jobs::{Job, JobStatus};
 use crate::routes::AppState;
+
+#[derive(Debug, Deserialize, Default)]
+pub struct EnrichQuery {
+    /// Opt-in backfill flag — see this module's doc comment. Missing from
+    /// the query string defaults to `false` (a normal pass); an explicit
+    /// `?retry_incomplete=true`/`false` is parsed as a bool by axum's
+    /// `Query` extractor — an unparseable value (e.g. `?retry_incomplete=maybe`)
+    /// is rejected with `400 Bad Request` before this handler runs, same
+    /// as any other malformed query param in this API.
+    #[serde(default)]
+    retry_incomplete: bool,
+}
 
 pub async fn trigger_ingest(State(state): State<AppState>) -> Result<(StatusCode, Json<Job>), ApiError> {
     let job = state.jobs.create("ingest");
@@ -90,18 +112,23 @@ fn fail_job(jobs: &crate::jobs::JobTracker, job_id: &str, error: String) {
     });
 }
 
-pub async fn trigger_enrich(State(state): State<AppState>) -> Result<(StatusCode, Json<Job>), ApiError> {
+pub async fn trigger_enrich(
+    State(state): State<AppState>,
+    Query(query): Query<EnrichQuery>,
+) -> Result<(StatusCode, Json<Job>), ApiError> {
     let job = state.jobs.create("enrich");
     let job_id = job.id.clone();
 
     let pool = state.pool.clone();
     let jobs = state.jobs.clone();
     let config = state.config.clone();
+    let retry_incomplete = query.retry_incomplete;
 
     tokio::spawn(async move {
         jobs.update(&job_id, |j| j.status = JobStatus::Running);
 
-        // Shared by both Nominatim (usage-policy requirement) and Places.
+        // Shared by Nominatim (usage-policy requirement), Census, Places,
+        // and Google Maps alike — one client, one User-Agent, reused.
         let http = match reqwest::Client::builder()
             .user_agent("cms-hpt-checker/0.1 (compliance-audit; +https://github.com/asathiabalan/healthcare-data-rest)")
             .build()
@@ -113,24 +140,31 @@ pub async fn trigger_enrich(State(state): State<AppState>) -> Result<(StatusCode
             }
         };
 
+        // Cascade order: census (free, best first-try hit rate) →
+        // nominatim (free, 1 req/sec, also opportunistically finds a
+        // website) → google_maps (paid, off by default). Each gated by
+        // its own GEOCODING_*_ENABLED flag.
         let mut providers: Vec<Box<dyn GeocodingProvider>> = Vec::new();
+        if config.geocoding_census_enabled {
+            providers.push(Box::new(CensusProvider::new(http.clone())));
+        }
         if config.geocoding_nominatim_enabled {
             providers.push(Box::new(NominatimProvider::new(http.clone())));
         }
-        // Census and Google Maps geocoding are still stubs (see
-        // IMPLEMENTATION_NOTES.md) — deliberately not added here even
-        // though `geocoding_census_enabled` / `geocoding_google_maps_enabled`
-        // exist as config flags. Add them once their providers are real;
-        // `GeoEnrichError::NotImplemented` is treated as transient by the
-        // cascade already, so adding a still-stubbed one back wouldn't
-        // break anything, just waste a cascade step on every hospital.
+        if let Some(google_maps) = GoogleMapsProvider::from_config(
+            http.clone(),
+            config.geocoding_google_maps_enabled,
+            config.geocoding_google_maps_api_key.clone(),
+        ) {
+            providers.push(Box::new(google_maps));
+        }
 
         if providers.is_empty() {
             fail_job(
                 &jobs,
                 &job_id,
-                "no geocoding providers enabled — set GEOCODING_NOMINATIM_ENABLED=true (Census and \
-                 Google Maps geocoding aren't implemented yet)"
+                "no geocoding providers enabled — set at least one of GEOCODING_CENSUS_ENABLED, \
+                 GEOCODING_NOMINATIM_ENABLED, or GEOCODING_GOOGLE_MAPS_ENABLED (with an API key) to true"
                     .to_string(),
             );
             return;
@@ -167,6 +201,7 @@ pub async fn trigger_enrich(State(state): State<AppState>) -> Result<(StatusCode
             places,
             enrich_config,
             config.enrich_batch_limit,
+            retry_incomplete,
             move |total| {
                 jobs_for_total.update(&job_id_for_total, |j| j.progress.total = total);
             },

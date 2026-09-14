@@ -14,10 +14,11 @@ pub enum GeoEnrichError {
     #[error("API key missing for provider: {0}")]
     MissingApiKey(String),
 
-    /// Provider stubs (Census, Google Maps geocoding — as of this pass)
-    /// raise this rather than making a real call. Not part of the
-    /// original Architecture.md error set; remove once every provider is
-    /// wired up.
+    /// Every geocoding provider in this crate (`census`, `nominatim`,
+    /// `google_maps`) is now real — this variant is unused today but kept
+    /// (and still treated as transient below) in case a future provider
+    /// ships as a stub first. Not part of the original Architecture.md
+    /// error set.
     #[error("provider `{0}` is not implemented yet")]
     NotImplemented(&'static str),
 
@@ -34,9 +35,10 @@ impl GeoEnrichError {
     /// Whether this error is transient (retryable / fallback-eligible).
     ///
     /// `NotImplemented` counts as transient too: a still-stubbed provider
-    /// (Census, as of this pass) should be skipped by the cascade like any
-    /// other provider that can't help, not treated as fatal for the whole
-    /// batch.
+    /// should be skipped by the cascade like any other provider that
+    /// can't help, not treated as fatal for the whole batch — relevant if
+    /// a future provider is added stub-first, the way `nominatim` and
+    /// `google_maps` briefly were.
     pub fn is_transient(&self) -> bool {
         matches!(
             self,

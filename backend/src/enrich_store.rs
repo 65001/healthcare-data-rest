@@ -23,21 +23,29 @@ impl HospitalStore {
 
 #[async_trait]
 impl UnenrichedHospitalStore for HospitalStore {
-    async fn list_unenriched(&self, limit: u32) -> Result<Vec<EnrichmentTarget>, GeoEnrichError> {
-        let rows = queries::list_unenriched_hospitals(&self.pool, limit)
+    async fn list_unenriched(
+        &self,
+        limit: u32,
+        retry_incomplete: bool,
+    ) -> Result<Vec<EnrichmentTarget>, GeoEnrichError> {
+        let rows = queries::list_unenriched_hospitals(&self.pool, limit, retry_incomplete)
             .await
             .map_err(|e| GeoEnrichError::Store(e.to_string()))?;
 
         Ok(rows
             .into_iter()
-            .map(|(facility_id, facility_name, address, city, state, zip_code)| EnrichmentTarget {
-                facility_id,
-                facility_name,
-                address,
-                city,
-                state,
-                zip_code,
-            })
+            .map(
+                |(facility_id, facility_name, address, city, state, zip_code, latitude, website_url)| EnrichmentTarget {
+                    facility_id,
+                    facility_name,
+                    address,
+                    city,
+                    state,
+                    zip_code,
+                    has_coordinates: latitude.is_some(),
+                    existing_website_url: website_url.filter(|s| !s.is_empty()),
+                },
+            )
             .collect())
     }
 

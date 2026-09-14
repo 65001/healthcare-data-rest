@@ -1,21 +1,24 @@
 //! Stage 2 of the pipeline: cascading geocoding, plus website discovery.
 //!
-//! **Status, this pass:**
-//! - `providers::nominatim` — **fully implemented.** Geocodes via the
-//!   public Nominatim instance, self-throttled to 1 req/sec per its usage
-//!   policy, and opportunistically reads a website out of OSM's
-//!   `extratags` when the tag is present.
+//! **Status:**
+//! - `providers::census`, `providers::nominatim`, `providers::google_maps`
+//!   — **all fully implemented**, forming the geocoding cascade (in that
+//!   priority order — free/best-hit-rate first, paid/last-resort last).
+//!   Nominatim self-throttles to 1 req/sec per its usage policy and
+//!   opportunistically reads a website out of OSM's `extratags` when
+//!   present; Census also has an unused (not wired in) bulk batch path,
+//!   see its doc comment.
 //! - `providers::google_places` — **fully implemented.** A dedicated
 //!   website lookup (Places API (New), Text Search), used as the fallback
-//!   when Nominatim didn't turn up a website. Separate from
+//!   when no geocode provider turned up a website. Separate from
 //!   `providers::google_maps` (Maps *Geocoding*, a different API/key) —
 //!   don't conflate the two.
-//! - `providers::census` and `providers::google_maps` — still stubs. Not
-//!   part of this pass; see their doc comments.
 //! - `enricher` — implemented: bounded-concurrency batch loop wiring the
 //!   cascade + Places fallback together against a small `UnenrichedHospitalStore`
 //!   trait, so this crate still doesn't depend on `backend`/`sqlx` directly
-//!   (Architecture.md's dependency graph stays one-directional).
+//!   (Architecture.md's dependency graph stays one-directional). Also
+//!   supports an opt-in `retry_incomplete` backfill pass for hospitals
+//!   that already ran once but are still missing a field.
 //!
 //! `backend`'s `POST /api/pipeline/enrich` route now runs this for real —
 //! see `backend/src/routes/pipeline.rs` and `backend/src/enrich_store.rs`.

@@ -36,6 +36,15 @@ impl Default for EnrichmentConfig {
 }
 
 /// One hospital's worth of the fields enrichment needs to read.
+///
+/// `has_coordinates` / `existing_website_url` reflect this hospital's
+/// current DB state at fetch time — always `false`/`None` on a first
+/// pass (only `enriched_at IS NULL` rows are ever fetched then), but
+/// meaningful on a `retry_incomplete` backfill pass, where a hospital can
+/// already have one field filled in and be missing only the other. They
+/// let `enrich_one` skip work it already has an answer for, rather than
+/// re-running a throttled Nominatim call or a paid Places call to
+/// rediscover something already on the row.
 #[derive(Debug, Clone)]
 pub struct EnrichmentTarget {
     pub facility_id: String,
@@ -44,12 +53,14 @@ pub struct EnrichmentTarget {
     pub city: String,
     pub state: String,
     pub zip_code: String,
+    pub has_coordinates: bool,
+    pub existing_website_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct GeocodeOutcome {
-    /// Which provider in the cascade resolved this (`"nominatim"`, once
-    /// Census is implemented also `"us_census"` / `"google_maps"`).
+    /// Which provider in the cascade resolved this: `"us_census"`,
+    /// `"nominatim"`, or `"google_maps"`.
     pub provider: String,
     pub latitude: f64,
     pub longitude: f64,
@@ -87,10 +98,26 @@ pub struct EnrichmentSummary {
 /// database-agnostic on purpose — see this module's doc comment.
 #[async_trait]
 pub trait UnenrichedHospitalStore: Send + Sync {
-    /// Up to `limit` hospitals with `enriched_at IS NULL`, per
-    /// Architecture.md's "skips hospitals that already have `enriched_at`
-    /// set" note.
-    async fn list_unenriched(&self, limit: u32) -> Result<Vec<EnrichmentTarget>, GeoEnrichError>;
+    /// Up to `limit` hospitals to (re-)process.
+    ///
+    /// `retry_incomplete: false` (the normal, default-cost path) selects
+    /// only hospitals with `enriched_at IS NULL`, per Architecture.md's
+    /// "skips hospitals that already have `enriched_at` set" note.
+    ///
+    /// `retry_incomplete: true` additionally selects hospitals that
+    /// already have `enriched_at` set but are still missing coordinates
+    /// or a website — a deliberate, opt-in backfill pass for whatever the
+    /// first pass's provider mix couldn't resolve. It's opt-in rather
+    /// than the default because every normal call would otherwise keep
+    /// re-attempting the addresses that predictably fail every time
+    /// (PO-box-only addresses, for instance), burning Nominatim's
+    /// throttled 1 req/sec and Google Places' paid quota on hospitals
+    /// unlikely to resolve differently.
+    async fn list_unenriched(
+        &self,
+        limit: u32,
+        retry_incomplete: bool,
+    ) -> Result<Vec<EnrichmentTarget>, GeoEnrichError>;
 
     /// Persist one outcome. Implementations should set `enriched_at`
     /// even when `outcome.geocode` is `None` — otherwise a hospital every
@@ -104,33 +131,49 @@ pub trait UnenrichedHospitalStore: Send + Sync {
 /// hospital is logged and treated as "not found" for that hospital,
 /// rather than aborting the whole batch — consistent with `cms-ingest`'s
 /// per-row error handling.
+///
+/// Skips the geocode cascade entirely when `target.has_coordinates` is
+/// already `true` (a `retry_incomplete` backfill row that's only missing
+/// a website) — there's nothing to gain from re-running a throttled
+/// Nominatim call, or a free-but-not-instant Census call, just to reach
+/// the opportunistic website read on a provider that already succeeded
+/// once. In that case `geocode` on the returned outcome is `None`, which
+/// `save_enrichment`'s callers correctly treat as "nothing changed" for
+/// the coordinate columns (see `db::queries::save_enrichment`'s doc
+/// comment) — the existing lat/long/provider on the row are left alone.
 async fn enrich_one(
     target: &EnrichmentTarget,
     geocoder: &CascadingGeocoder,
     places: Option<&GooglePlacesClient>,
 ) -> EnrichmentOutcome {
-    let geocode = match geocoder
-        .geocode(&target.address, &target.city, &target.state, &target.zip_code)
-        .await
-    {
-        Ok(found) => found,
-        Err(e) => {
-            tracing::warn!(
-                facility_id = %target.facility_id,
-                error = %e,
-                "geocoding cascade failed for this hospital"
-            );
-            None
+    let mut website_url = target.existing_website_url.clone();
+    let mut website_source = None;
+
+    let geocode = if target.has_coordinates {
+        None
+    } else {
+        match geocoder
+            .geocode(&target.address, &target.city, &target.state, &target.zip_code)
+            .await
+        {
+            Ok(found) => found,
+            Err(e) => {
+                tracing::warn!(
+                    facility_id = %target.facility_id,
+                    error = %e,
+                    "geocoding cascade failed for this hospital"
+                );
+                None
+            }
         }
     };
 
-    let mut website_url = None;
-    let mut website_source = None;
-
     if let Some((provider, result)) = &geocode {
-        if let Some(url) = &result.website_url {
-            website_url = Some(url.clone());
-            website_source = Some(provider.clone());
+        if website_url.is_none() {
+            if let Some(url) = &result.website_url {
+                website_url = Some(url.clone());
+                website_source = Some(provider.clone());
+            }
         }
     }
 
@@ -192,12 +235,17 @@ async fn enrich_one(
 /// completion order (no `FuturesUnordered`) — the running totals are
 /// still accurate, just not reported in strict wall-clock-completion
 /// order. Kept simple deliberately; revisit if that ordering matters.
+///
+/// `retry_incomplete` is forwarded straight to
+/// `UnenrichedHospitalStore::list_unenriched` — see that method's doc
+/// comment for what it changes about which hospitals get fetched.
 pub async fn enrich_batch<OnTotal, OnProgress>(
     store: &dyn UnenrichedHospitalStore,
     geocoder: Arc<CascadingGeocoder>,
     places: Option<Arc<GooglePlacesClient>>,
     config: EnrichmentConfig,
     limit: u32,
+    retry_incomplete: bool,
     on_total: OnTotal,
     mut on_progress: OnProgress,
 ) -> Result<EnrichmentSummary, GeoEnrichError>
@@ -205,7 +253,7 @@ where
     OnTotal: FnOnce(u64),
     OnProgress: FnMut(&EnrichmentOutcome, bool),
 {
-    let targets = store.list_unenriched(limit).await?;
+    let targets = store.list_unenriched(limit, retry_incomplete).await?;
     let total = targets.len() as u64;
     on_total(total);
 

@@ -1,11 +1,22 @@
 //! US Census Bureau Geocoder — priority 1 (free, no API key).
 //!
 //! Implements single-address lookup via the `GeocodingProvider` trait:
-//! `GET https://geocoding.geo.census.gov/geocoder/locations/address`
+//! `GET https://geocoding.geo.census.gov/geocoder/locations/address` — this
+//! is what `backend/src/routes/pipeline.rs` wires into the cascade,
+//! ahead of `nominatim`, since it's free and generally the highest
+//! first-try success rate of the three providers.
 //!
 //! Also provides bulk batch geocoding via:
 //! `POST https://geocoding.geo.census.gov/geocoder/locations/addressbatch`
 //! which processes up to 10,000 addresses per HTTP request in seconds.
+//! **This batch path is not currently called from anywhere** —
+//! `enricher::enrich_batch` processes hospitals one at a time through
+//! `CascadingGeocoder` (bounded concurrency, not true request batching),
+//! so `geocode_batch`/`geocode_batch_chunk` are unused outside their own
+//! unit test. It's a legitimate future optimization (one HTTP call per
+//! 1,000 hospitals instead of one per hospital) but wiring it in would
+//! mean a separate code path from the rest of the cascade — worth doing
+//! deliberately, not as a drive-by change.
 
 use std::collections::HashMap;
 use std::time::Duration;

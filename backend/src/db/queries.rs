@@ -214,24 +214,43 @@ pub async fn status_counts_by_state(pool: &SqlitePool) -> Result<Vec<StatusCount
         .collect())
 }
 
-/// Up to `limit` hospitals with `enriched_at IS NULL`, for
-/// `enrich_store::HospitalStore::list_unenriched`. Returned as plain
-/// tuples rather than a `FromRow` struct on purpose — the shape here
-/// belongs to `geo_enrich::enricher::EnrichmentTarget`, defined in a
-/// crate this one depends on (not the reverse), so it can't derive
-/// `sqlx::FromRow` (that would pull `sqlx` into `geo-enrich`, which is
-/// meant to stay database-agnostic — see that crate's `enricher.rs`).
+/// One row of what `enrich_store::HospitalStore::list_unenriched` needs
+/// to build a `geo_enrich::enricher::EnrichmentTarget`: the address
+/// fields plus the two columns that tell it what's already on the row
+/// (`latitude` — `Some` means this hospital already has coordinates;
+/// `website_url` — carried through as-is). Returned as a plain tuple
+/// rather than a `FromRow` struct on purpose — the target shape belongs
+/// to `geo_enrich`, a crate this one depends on (not the reverse), so it
+/// can't derive `sqlx::FromRow` (that would pull `sqlx` into `geo-enrich`,
+/// which is meant to stay database-agnostic — see that crate's
+/// `enricher.rs`).
+pub type UnenrichedRow = (String, String, String, String, String, String, Option<f64>, Option<String>);
+
+/// Up to `limit` hospitals to (re-)process.
+///
+/// `retry_incomplete: false` selects only `enriched_at IS NULL` rows —
+/// the normal, default-cost path. `retry_incomplete: true` additionally
+/// selects rows that already have `enriched_at` set but are still
+/// missing `latitude` or `website_url` — see
+/// `geo_enrich::enricher::UnenrichedHospitalStore::list_unenriched`'s
+/// doc comment for why that's opt-in rather than always-on.
 pub async fn list_unenriched_hospitals(
     pool: &SqlitePool,
     limit: u32,
-) -> Result<Vec<(String, String, String, String, String, String)>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT facility_id, facility_name, address, city, state, zip_code \
-         FROM hospitals WHERE enriched_at IS NULL LIMIT ?",
-    )
-    .bind(limit as i64)
-    .fetch_all(pool)
-    .await
+    retry_incomplete: bool,
+) -> Result<Vec<UnenrichedRow>, sqlx::Error> {
+    let where_clause = if retry_incomplete {
+        "enriched_at IS NULL \
+         OR latitude IS NULL \
+         OR website_url IS NULL OR website_url = ''"
+    } else {
+        "enriched_at IS NULL"
+    };
+    let sql = format!(
+        "SELECT facility_id, facility_name, address, city, state, zip_code, latitude, website_url \
+         FROM hospitals WHERE {where_clause} LIMIT ?"
+    );
+    sqlx::query_as(&sql).bind(limit as i64).fetch_all(pool).await
 }
 
 /// One hospital's geocode result, in the shape `save_enrichment` needs:
