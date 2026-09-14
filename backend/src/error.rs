@@ -7,7 +7,18 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use serde::Serialize;
 use serde_json::json;
+use utoipa::ToSchema;
+
+/// Documents the `{ "error": "..." }` body every non-2xx response returns.
+/// Not the type actually constructed on the error path (that's still
+/// `serde_json::json!` below) — this exists purely so `#[utoipa::path]`
+/// responses have a concrete schema to point at.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ErrorResponse {
+    pub error: String,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {

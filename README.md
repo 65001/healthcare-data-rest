@@ -106,6 +106,26 @@ curl http://localhost:3000/api/stats
 
 ---
 
+## Frontend
+
+A [Vite](https://vite.dev) + React + TypeScript console for browsing the dataset and manually
+filling in whatever the automated pipeline couldn't resolve (coordinates, websites) — lives in
+[`frontend/`](frontend/). Built with Tailwind CSS v4, TanStack Query (data fetching/caching) and
+TanStack Table.
+
+```bash
+cd frontend
+npm install
+npm run dev   # http://localhost:5173, proxies /api to the backend on :3000
+```
+
+Run the backend (`cargo run -p backend`) first — the dev server proxies `/api/*` requests to
+`http://localhost:3000` (override with `VITE_API_PROXY_TARGET`). Pages: a stats dashboard with
+pipeline triggers, the manual-enrichment queue (`GET /api/hospitals/needs-enrichment`, editable
+inline, `PATCH .../enrichment` on save), and a filterable browse view of the full dataset.
+
+---
+
 ## API Reference
 
 | Method | Path | Description |
@@ -149,7 +169,6 @@ curl http://localhost:3000/api/stats
 - MRF content validation against CMS schemas
 - MRF metadata extraction (SHA-1, Last-Modified, ETag, Cache-Control)
 - Recurring scheduled scans
-- Frontend / dashboard
 
 ---
 

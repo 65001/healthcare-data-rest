@@ -3,6 +3,7 @@ mod db;
 mod enrich_store;
 mod error;
 mod jobs;
+mod openapi;
 mod routes;
 
 use std::sync::Arc;

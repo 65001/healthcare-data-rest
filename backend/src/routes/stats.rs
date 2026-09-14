@@ -5,12 +5,13 @@ use std::collections::HashMap;
 use axum::extract::State;
 use axum::Json;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::db::queries;
 use crate::error::ApiError;
 use crate::routes::AppState;
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, ToSchema)]
 pub struct StatusBreakdown {
     pub total: i64,
     pub mrf_found: i64,
@@ -37,7 +38,7 @@ impl StatusBreakdown {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct StatsResponse {
     pub total_hospitals: i64,
     pub enriched: i64,
@@ -45,6 +46,18 @@ pub struct StatsResponse {
     pub by_state: HashMap<String, StatusBreakdown>,
 }
 
+/// Aggregate statistics
+///
+/// Total hospitals, how many are enriched, and MRF discovery-status
+/// breakdowns overall and per state.
+#[utoipa::path(
+    get,
+    path = "/api/stats",
+    responses(
+        (status = 200, description = "Aggregate statistics", body = StatsResponse),
+    ),
+    tag = "stats",
+)]
 pub async fn get_stats(State(state): State<AppState>) -> Result<Json<StatsResponse>, ApiError> {
     let total_hospitals = queries::total_hospitals(&state.pool).await?;
     let enriched = queries::enriched_count(&state.pool).await?;

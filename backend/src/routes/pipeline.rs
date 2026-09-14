@@ -30,17 +30,18 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
+use utoipa::IntoParams;
 
 use geo_enrich::enricher::EnrichmentConfig;
 use geo_enrich::providers::{CensusProvider, GoogleMapsProvider, GooglePlacesClient, NominatimProvider};
 use geo_enrich::{CascadingGeocoder, GeocodingProvider};
 
 use crate::enrich_store::HospitalStore;
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorResponse};
 use crate::jobs::{Job, JobStatus};
 use crate::routes::AppState;
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, IntoParams)]
 pub struct EnrichQuery {
     /// Opt-in backfill flag — see this module's doc comment. Missing from
     /// the query string defaults to `false` (a normal pass); an explicit
@@ -52,6 +53,20 @@ pub struct EnrichQuery {
     retry_incomplete: bool,
 }
 
+/// Trigger CMS ingest
+///
+/// Fetches the "Hospital General Information" dataset from
+/// data.cms.gov and upserts it into the `hospitals` table. Runs in the
+/// background; poll `GET /api/pipeline/jobs/{id}` with the returned job
+/// id for progress.
+#[utoipa::path(
+    post,
+    path = "/api/pipeline/ingest",
+    responses(
+        (status = 202, description = "Ingest job accepted", body = Job),
+    ),
+    tag = "pipeline",
+)]
 pub async fn trigger_ingest(State(state): State<AppState>) -> Result<(StatusCode, Json<Job>), ApiError> {
     let job = state.jobs.create("ingest");
     let job_id = job.id.clone();
@@ -112,6 +127,21 @@ fn fail_job(jobs: &crate::jobs::JobTracker, job_id: &str, error: String) {
     });
 }
 
+/// Trigger geocoding enrichment
+///
+/// Runs the cascading geocoder (Census → Nominatim → Google Maps, each
+/// gated by its own config flag) over up to `ENRICH_BATCH_LIMIT`
+/// un-enriched hospitals. Runs in the background; poll
+/// `GET /api/pipeline/jobs/{id}` with the returned job id for progress.
+#[utoipa::path(
+    post,
+    path = "/api/pipeline/enrich",
+    params(EnrichQuery),
+    responses(
+        (status = 202, description = "Enrich job accepted", body = Job),
+    ),
+    tag = "pipeline",
+)]
 pub async fn trigger_enrich(
     State(state): State<AppState>,
     Query(query): Query<EnrichQuery>,
@@ -239,6 +269,19 @@ pub async fn trigger_enrich(
     Ok((StatusCode::ACCEPTED, Json(job)))
 }
 
+/// Trigger MRF discovery
+///
+/// Probes each enriched hospital's website for a `cms-hpt.txt` manifest
+/// and its listed MRF URLs. **Not implemented yet** — always returns
+/// `501`; see `compliance-probe/src/` and `IMPLEMENTATION_NOTES.md`.
+#[utoipa::path(
+    post,
+    path = "/api/pipeline/discover",
+    responses(
+        (status = 501, description = "Not implemented yet", body = ErrorResponse),
+    ),
+    tag = "pipeline",
+)]
 pub async fn trigger_discover() -> ApiError {
     ApiError::NotImplemented {
         stage: "discover",
@@ -249,6 +292,22 @@ pub async fn trigger_discover() -> ApiError {
     }
 }
 
+/// Get job status
+///
+/// Poll this with the job id returned by any `POST /api/pipeline/*`
+/// trigger endpoint to track progress.
+#[utoipa::path(
+    get,
+    path = "/api/pipeline/jobs/{id}",
+    params(
+        ("id" = String, Path, description = "Job id returned by a trigger endpoint"),
+    ),
+    responses(
+        (status = 200, description = "The job's current state", body = Job),
+        (status = 404, description = "No job with that id (never existed, or the process restarted — jobs aren't persisted)", body = ErrorResponse),
+    ),
+    tag = "pipeline",
+)]
 pub async fn get_job(
     State(state): State<AppState>,
     Path(id): Path<String>,

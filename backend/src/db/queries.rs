@@ -10,7 +10,7 @@
 use chrono::Utc;
 use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 
-use crate::db::models::{Hospital, HospitalListItem, MrfDiscovery, StatusCount};
+use crate::db::models::{Hospital, HospitalListItem, MrfDiscovery, NeedsEnrichmentItem, StatusCount};
 
 /// A hospital record's `facility_id` may not have a matching latest-row
 /// in `mrf_discoveries` yet — this join condition is reused by both the
@@ -321,4 +321,260 @@ pub async fn save_enrichment(
     }
 
     Ok(())
+}
+
+/// `missing` narrows the "still incomplete" set to just `"coordinates"` or
+/// `"website"`; `None` (or any other value the caller might pass — callers
+/// are expected to have already validated it, see
+/// `routes::hospitals::needs_enrichment`) keeps the default "either" filter.
+fn push_needs_enrichment_filters(qb: &mut QueryBuilder<'_, Sqlite>, missing: Option<&str>, state: Option<&str>) {
+    match missing {
+        Some("coordinates") => {
+            qb.push(" AND latitude IS NULL");
+        }
+        Some("website") => {
+            qb.push(" AND (website_url IS NULL OR website_url = '')");
+        }
+        _ => {
+            qb.push(" AND (latitude IS NULL OR website_url IS NULL OR website_url = '')");
+        }
+    }
+    if let Some(state) = state {
+        qb.push(" AND state = ").push_bind(state.to_string());
+    }
+}
+
+/// Backs `GET /api/hospitals/needs-enrichment` — hospitals the automated
+/// pipeline already ran on (`enriched_at IS NOT NULL`) but is still
+/// missing coordinates and/or a website for. See
+/// `routes::hospitals::needs_enrichment` for query-param validation.
+pub async fn list_needs_enrichment(
+    pool: &SqlitePool,
+    missing: Option<&str>,
+    state: Option<&str>,
+    page: u32,
+    per_page: u32,
+) -> Result<(Vec<NeedsEnrichmentItem>, i64), sqlx::Error> {
+    let page = page.max(1);
+    let offset = (page - 1) as i64 * per_page as i64;
+
+    let mut count_qb: QueryBuilder<Sqlite> =
+        QueryBuilder::new("SELECT COUNT(*) FROM hospitals WHERE enriched_at IS NOT NULL");
+    push_needs_enrichment_filters(&mut count_qb, missing, state);
+    let total_count: i64 = count_qb.build_query_scalar().fetch_one(pool).await?;
+
+    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+        r#"SELECT facility_id, facility_name, address, city, state, zip_code,
+                  (latitude IS NULL) AS missing_coordinates,
+                  (website_url IS NULL OR website_url = '') AS missing_website
+           FROM hospitals
+           WHERE enriched_at IS NOT NULL"#,
+    );
+    push_needs_enrichment_filters(&mut qb, missing, state);
+    qb.push(" ORDER BY facility_id LIMIT ");
+    qb.push_bind(per_page as i64);
+    qb.push(" OFFSET ");
+    qb.push_bind(offset);
+
+    let rows = qb.build_query_as::<NeedsEnrichmentItem>().fetch_all(pool).await?;
+
+    Ok((rows, total_count))
+}
+
+/// Backs `PATCH /api/hospitals/:facility_id/enrichment`. Only the fields
+/// that are `Some` are written — unlike `save_enrichment` (the automated
+/// pipeline's save path), a value passed here **overwrites** whatever was
+/// there before, per Architecture.md's manual-enrichment spec ("a manual
+/// correction here is assumed intentional"). `latitude`/`longitude` are
+/// expected to arrive together or not at all — the route handler
+/// validates that (and the lat/lon range, and the website URL scheme)
+/// before calling this. Stamps `geo_provider = "manual"` and
+/// `geo_confidence = 1.0` when coordinates are set, and only fills in
+/// `enriched_at` if it wasn't already set (`COALESCE`), same as the
+/// automated path.
+///
+/// Returns the number of rows affected — `0` means `facility_id` doesn't
+/// exist, which the caller maps to `404`.
+pub async fn manual_enrich_hospital(
+    pool: &SqlitePool,
+    facility_id: &str,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+    website_url: Option<&str>,
+) -> Result<u64, sqlx::Error> {
+    let now = Utc::now().to_rfc3339();
+
+    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("UPDATE hospitals SET ");
+    let mut first = true;
+
+    if let (Some(lat), Some(lon)) = (latitude, longitude) {
+        qb.push("latitude = ").push_bind(lat);
+        qb.push(", longitude = ").push_bind(lon);
+        qb.push(", geo_provider = ").push_bind("manual");
+        qb.push(", geo_confidence = ").push_bind(1.0_f64);
+        first = false;
+    }
+    if let Some(url) = website_url {
+        if !first {
+            qb.push(", ");
+        }
+        qb.push("website_url = ").push_bind(url.to_string());
+        first = false;
+    }
+    if !first {
+        qb.push(", ");
+    }
+    qb.push("enriched_at = COALESCE(enriched_at, ");
+    qb.push_bind(now.clone());
+    qb.push(")");
+    qb.push(", updated_at = ");
+    qb.push_bind(now);
+    qb.push(" WHERE facility_id = ");
+    qb.push_bind(facility_id.to_string());
+
+    let result = qb.build().execute(pool).await?;
+    Ok(result.rows_affected())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    /// A fresh, fully-migrated in-memory database. `max_connections(1)`
+    /// matters here — SQLite's `:memory:` database is per-connection, so
+    /// a pool that hands out more than one connection would make the
+    /// migration invisible to whichever connection a later query lands
+    /// on.
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open in-memory sqlite db");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("run migrations");
+        pool
+    }
+
+    /// Inserts a minimal hospital row with the given enrichment state.
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_hospital(
+        pool: &SqlitePool,
+        facility_id: &str,
+        state: &str,
+        latitude: Option<f64>,
+        website_url: Option<&str>,
+        enriched: bool,
+    ) {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO hospitals (
+                facility_id, facility_name, address, city, state, zip_code,
+                hospital_type, hospital_ownership, emergency_services,
+                latitude, longitude, website_url, enriched_at,
+                ingested_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(facility_id)
+        .bind(format!("Test Hospital {facility_id}"))
+        .bind("123 Main St")
+        .bind("Anytown")
+        .bind(state)
+        .bind("00000")
+        .bind("Acute Care Hospitals")
+        .bind("Voluntary non-profit")
+        .bind(false)
+        .bind(latitude)
+        .bind(latitude.map(|_| -70.0))
+        .bind(website_url)
+        .bind(enriched.then(|| now.clone()))
+        .bind(&now)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .expect("insert test hospital");
+    }
+
+    #[tokio::test]
+    async fn needs_enrichment_only_surfaces_incomplete_enriched_hospitals() {
+        let pool = test_pool().await;
+
+        // Enriched, missing coordinates only.
+        insert_hospital(&pool, "H1", "CA", None, Some("https://h1.example"), true).await;
+        // Enriched, missing website only.
+        insert_hospital(&pool, "H2", "CA", Some(34.0), None, true).await;
+        // Enriched, missing both.
+        insert_hospital(&pool, "H3", "TX", None, None, true).await;
+        // Never run by the pipeline at all — must NOT show up here.
+        insert_hospital(&pool, "H4", "CA", None, None, false).await;
+        // Fully resolved — must NOT show up here.
+        insert_hospital(&pool, "H5", "CA", Some(34.0), Some("https://h5.example"), true).await;
+
+        let (either, total) = list_needs_enrichment(&pool, None, None, 1, 50).await.unwrap();
+        let mut ids: Vec<_> = either.iter().map(|r| r.facility_id.clone()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["H1", "H2", "H3"]);
+        assert_eq!(total, 3);
+
+        let (coords_only, _) = list_needs_enrichment(&pool, Some("coordinates"), None, 1, 50)
+            .await
+            .unwrap();
+        let mut ids: Vec<_> = coords_only.iter().map(|r| r.facility_id.clone()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["H1", "H3"]);
+        assert!(coords_only.iter().all(|r| r.missing_coordinates));
+
+        let (website_only, _) = list_needs_enrichment(&pool, Some("website"), None, 1, 50)
+            .await
+            .unwrap();
+        let mut ids: Vec<_> = website_only.iter().map(|r| r.facility_id.clone()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["H2", "H3"]);
+
+        let (tx_only, tx_total) = list_needs_enrichment(&pool, None, Some("TX"), 1, 50).await.unwrap();
+        assert_eq!(tx_total, 1);
+        assert_eq!(tx_only[0].facility_id, "H3");
+        assert!(tx_only[0].missing_coordinates && tx_only[0].missing_website);
+    }
+
+    #[tokio::test]
+    async fn manual_enrich_sets_coordinates_and_marks_provider_manual() {
+        let pool = test_pool().await;
+        insert_hospital(&pool, "H1", "CA", None, None, false).await;
+
+        let rows = manual_enrich_hospital(&pool, "H1", Some(31.451773), Some(-85.63101), Some("https://example-hospital.org"))
+            .await
+            .unwrap();
+        assert_eq!(rows, 1);
+
+        let (hospital, _) = get_hospital(&pool, "H1").await.unwrap().unwrap();
+        assert_eq!(hospital.latitude, Some(31.451773));
+        assert_eq!(hospital.longitude, Some(-85.63101));
+        assert_eq!(hospital.geo_provider.as_deref(), Some("manual"));
+        assert_eq!(hospital.geo_confidence, Some(1.0));
+        assert_eq!(hospital.website_url.as_deref(), Some("https://example-hospital.org"));
+        assert!(hospital.enriched_at.is_some());
+        let first_enriched_at = hospital.enriched_at.clone().unwrap();
+
+        // A later website-only correction overwrites the website but
+        // doesn't touch the coordinates or clobber `enriched_at`.
+        let rows = manual_enrich_hospital(&pool, "H1", None, None, Some("https://new-site.example")).await.unwrap();
+        assert_eq!(rows, 1);
+        let (hospital, _) = get_hospital(&pool, "H1").await.unwrap().unwrap();
+        assert_eq!(hospital.website_url.as_deref(), Some("https://new-site.example"));
+        assert_eq!(hospital.latitude, Some(31.451773));
+        assert_eq!(hospital.geo_provider.as_deref(), Some("manual"));
+        assert_eq!(hospital.enriched_at, Some(first_enriched_at));
+    }
+
+    #[tokio::test]
+    async fn manual_enrich_unknown_facility_affects_no_rows() {
+        let pool = test_pool().await;
+        let rows = manual_enrich_hospital(&pool, "does-not-exist", Some(1.0), Some(2.0), None)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
 }

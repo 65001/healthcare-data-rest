@@ -14,9 +14,10 @@ use std::sync::{Arc, RwLock};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
     Pending,
@@ -25,7 +26,7 @@ pub enum JobStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct JobProgress {
     pub total: u64,
     pub completed: u64,
@@ -38,13 +39,15 @@ impl Default for JobProgress {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct Job {
     pub id: String,
     pub stage: String,
     pub status: JobStatus,
     pub progress: JobProgress,
+    #[schema(value_type = String, format = "date-time")]
     pub started_at: DateTime<Utc>,
+    #[schema(value_type = Option<String>, format = "date-time")]
     pub finished_at: Option<DateTime<Utc>>,
     pub error: Option<String>,
 }

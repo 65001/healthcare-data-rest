@@ -4,9 +4,10 @@
 
 use serde::Serialize;
 use sqlx::FromRow;
+use utoipa::ToSchema;
 
 /// Full row from the `hospitals` table.
-#[derive(Debug, Clone, FromRow, Serialize)]
+#[derive(Debug, Clone, FromRow, Serialize, ToSchema)]
 pub struct Hospital {
     pub facility_id: String,
     pub facility_name: String,
@@ -36,7 +37,7 @@ pub struct Hospital {
 /// Projection used by `GET /api/hospitals` — Architecture.md's example
 /// response is a subset of the full row, plus the hospital's *latest*
 /// MRF discovery status joined in.
-#[derive(Debug, Clone, FromRow, Serialize)]
+#[derive(Debug, Clone, FromRow, Serialize, ToSchema)]
 pub struct HospitalListItem {
     pub facility_id: String,
     pub facility_name: String,
@@ -52,7 +53,7 @@ pub struct HospitalListItem {
 }
 
 /// Full row from the `mrf_discoveries` table.
-#[derive(Debug, Clone, FromRow, Serialize)]
+#[derive(Debug, Clone, FromRow, Serialize, ToSchema)]
 pub struct MrfDiscovery {
     pub id: String,
     pub facility_id: String,
@@ -66,6 +67,21 @@ pub struct MrfDiscovery {
     pub mrf_urls: Option<String>,
     pub discovery_status: String,
     pub checked_at: String,
+}
+
+/// One row of `GET /api/hospitals/needs-enrichment` — hospitals the
+/// automated pipeline already ran on (`enriched_at IS NOT NULL`) but
+/// couldn't fully resolve.
+#[derive(Debug, Clone, FromRow, Serialize, ToSchema)]
+pub struct NeedsEnrichmentItem {
+    pub facility_id: String,
+    pub facility_name: String,
+    pub address: String,
+    pub city: String,
+    pub state: String,
+    pub zip_code: String,
+    pub missing_coordinates: bool,
+    pub missing_website: bool,
 }
 
 /// One row of the `discovery` breakdown in `GET /api/stats`.

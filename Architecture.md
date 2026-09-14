@@ -110,8 +110,8 @@ Geocodes hospital addresses using the cascading provider chain. Also attempts to
 ```
 
 - Bounded concurrency via `tokio::sync::Semaphore`.
-- Skips hospitals that already have `enriched_at` set.
-- Records which provider succeeded (`geo_provider` column).
+- Skips hospitals that already have `enriched_at` set, unless the caller opts into a backfill pass (`?retry_incomplete=true` on `POST /api/pipeline/enrich`) for hospitals that ran once but are still missing coordinates or a website.
+- Records which provider succeeded (`geo_provider` column) — `"manual"` when a human filled in the gap via `PATCH /api/hospitals/:facility_id/enrichment` rather than an automated provider (see [REST API](#rest-api)).
 
 ### Stage 3: Discover
 
@@ -155,6 +155,7 @@ healthcare-data-rest/
 │       ├── main.rs         # Entry point
 │       ├── config.rs       # Environment-based configuration
 │       ├── jobs.rs         # Background job tracker
+│       ├── enrich_store.rs # geo_enrich::UnenrichedHospitalStore impl
 │       ├── db/
 │       │   ├── mod.rs      # Connection pool setup
 │       │   ├── models.rs   # SQLx FromRow structs
@@ -183,7 +184,8 @@ healthcare-data-rest/
 │           ├── mod.rs
 │           ├── census.rs   # US Census Bureau Geocoder
 │           ├── nominatim.rs# OpenStreetMap Nominatim
-│           └── google_maps.rs
+│           ├── google_maps.rs
+│           └── google_places.rs # Website-discovery fallback
 └── compliance-probe/       # MRF discovery
     ├── Cargo.toml
     └── src/
@@ -265,9 +267,11 @@ impl CascadingGeocoder {
 
 | Priority | Provider | Cost | Rate Limit | Notes |
 |----------|----------|------|------------|-------|
-| 1 | US Census Bureau | Free | Batch (10K/file) | Best for US addresses; batch mode reduces HTTP calls |
+| 1 | US Census Bureau | Free | Batch (10K/file) | Best for US addresses; batch mode exists (`CensusProvider::geocode_batch`) but isn't wired into the cascade yet — the cascade calls providers one hospital at a time |
 | 2 | Nominatim (OSM) | Free | 1 req/sec | Good fallback; self-hostable for higher throughput |
 | 3 | Google Maps | ~$5/1K | 50 req/sec | Highest accuracy; used only for Census+OSM failures |
+
+Not part of the geocoding cascade, but part of the same "resolve everything about a hospital automatically" story: **Google Places** is a separate website-discovery fallback (`geo-enrich/src/providers/google_places.rs`), used when a geocode provider's opportunistic website read (currently only Nominatim's OSM `extratags`) comes up empty.
 
 ### Multi-Pass Strategy
 
@@ -277,7 +281,7 @@ Because the cascade skips already-enriched records, you can run enrichment multi
 2. **Pass 2** — Enable Census + Nominatim. Picks up rural/unusual addresses.
 3. **Pass 3** — Enable all three. Google Maps resolves remaining edge cases.
 
-Each pass only processes hospitals where `enriched_at IS NULL`.
+Each pass only processes hospitals where `enriched_at IS NULL`. For hospitals that already ran through every enabled provider and still came up short (a genuinely bad address, most often), see **Manual Enrichment** under [REST API](#rest-api) — some gaps (PO-box-only addresses, no street to geocode) aren't resolvable by any address-geocoding API, free or paid, and need a human to look the hospital up directly.
 
 ---
 
@@ -294,7 +298,7 @@ CREATE TABLE hospitals (
     address             TEXT NOT NULL,
     city                TEXT NOT NULL,
     state               TEXT NOT NULL,
-    zip_code            TEXT NOT NULL,
+    zip_code             TEXT NOT NULL,
     county_name         TEXT,
     phone_number        TEXT,
     hospital_type       TEXT NOT NULL,
@@ -320,6 +324,8 @@ CREATE INDEX idx_hospitals_state ON hospitals(state);
 CREATE INDEX idx_hospitals_type ON hospitals(hospital_type);
 CREATE INDEX idx_hospitals_enriched ON hospitals(enriched_at);
 ```
+
+`geo_provider = 'manual'` marks a hospital whose coordinates were set by a human via `PATCH /api/hospitals/:facility_id/enrichment` rather than an automated provider (`us_census` / `nominatim` / `google_maps`) — no separate schema column for this; it reuses the existing `geo_provider` field as its own distinct value, with `geo_confidence` set to `1.0`.
 
 ### `mrf_discoveries` Table
 
@@ -421,6 +427,62 @@ List hospitals with pagination and filtering.
 
 Full detail for a single hospital including enrichment and latest MRF discovery.
 
+#### `GET /api/hospitals/needs-enrichment`
+
+**Added alongside manual enrichment (see below).** Hospitals the *automated* pipeline already ran on (`enriched_at IS NOT NULL`) but couldn't fully resolve — still missing coordinates, a website, or both. This is the manual-review queue: a hospital the pipeline hasn't reached at all (`enriched_at IS NULL`) belongs in `POST /api/pipeline/enrich` instead (see below), not here.
+
+**Query Parameters:**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `missing` | `string` | `"coordinates"` or `"website"`. Omitted = either (default) |
+| `state` | `string` | Filter by two-letter state code |
+| `page` | `int` | Page number (default: 1) |
+| `per_page` | `int` | Results per page (default: 50, max: 200) |
+
+**Response:** `200 OK`
+```json
+{
+  "data": [
+    {
+      "facility_id": "011304",
+      "facility_name": "OCHSNER CHOCTAW GENERAL",
+      "address": "401 VANITY FAIR LANE, PO BOX 618",
+      "city": "BUTLER",
+      "state": "AL",
+      "zip_code": "36904",
+      "missing_coordinates": true,
+      "missing_website": true
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "per_page": 50,
+    "total_count": 270,
+    "total_pages": 6
+  }
+}
+```
+
+#### `PATCH /api/hospitals/:facility_id/enrichment`
+
+**Manual enrichment.** Sets coordinates and/or a website by hand for one hospital — for whatever `POST /api/pipeline/enrich` (every provider in the cascade, including the `?retry_incomplete=true` backfill pass) couldn't resolve. Typically used against the queue `GET /api/hospitals/needs-enrichment` surfaces.
+
+**Request body** (all fields optional; provide at least one):
+```json
+{
+  "latitude": 31.451773,
+  "longitude": -85.631010,
+  "website_url": "https://example-hospital.org"
+}
+```
+- `latitude`/`longitude` must be provided together (not just one) and must be in-range (`[-90, 90]` / `[-180, 180]`).
+- `website_url` must start with `http://` or `https://`.
+- Whatever's provided **overwrites** the existing value outright — unlike the automated pipeline's save path, which never clobbers an existing find, a manual correction here is assumed intentional.
+- A successful update stamps `geo_provider = "manual"` and `geo_confidence = 1.0` when coordinates are set, and sets `enriched_at` if it wasn't already.
+
+**Response:** `200 OK` — the updated hospital row (full `hospitals` table row, same shape as `GET /api/hospitals/:facility_id`'s `hospital` field). `404` if `facility_id` doesn't exist; `400` for a validation failure (see above).
+
 #### `GET /api/stats`
 
 Aggregate statistics.
@@ -453,6 +515,12 @@ Trigger CMS data ingestion. Returns a job ID.
 #### `POST /api/pipeline/enrich`
 
 Trigger geocoding enrichment for un-enriched hospitals. Returns a job ID.
+
+**Query Parameters:**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `retry_incomplete` | `bool` | `true` also re-selects hospitals that already ran once but are still missing coordinates or a website (opt-in backfill pass — see [Multi-Pass Strategy](#multi-pass-strategy)). Default `false`: only `enriched_at IS NULL` hospitals. |
 
 #### `POST /api/pipeline/discover`
 
@@ -522,7 +590,7 @@ The `backend` crate maps all errors to appropriate HTTP status codes via an `Int
 
 - `tokio::sync::Semaphore` bounds concurrent geocoding requests (configurable, default: 10).
 - Per-provider rate limiting is handled internally by each provider implementation.
-- Census batch mode processes up to 10,000 addresses per HTTP request.
+- Census batch mode (`geocode_batch`) processes up to 10,000 addresses per HTTP request, but isn't wired into the cascade yet — the cascade currently geocodes one hospital at a time regardless of which provider handles it.
 
 ### MRF Probing
 
@@ -546,6 +614,10 @@ All configuration is environment-based (loaded via `dotenvy`):
 | `GEOCODING_NOMINATIM_ENABLED` | `true` | Enable Nominatim geocoder |
 | `GEOCODING_GOOGLE_MAPS_ENABLED` | `false` | Enable Google Maps geocoder |
 | `GEOCODING_GOOGLE_MAPS_API_KEY` | — | Google Maps API key |
+| `GOOGLE_PLACES_ENABLED` | `false` | Enable Google Places website-discovery fallback |
+| `GOOGLE_PLACES_API_KEY` | — | Google Places API key (separate from the Maps Geocoding key) |
+| `ENRICH_CONCURRENCY` | `10` | Max concurrent enrichment tasks |
+| `ENRICH_BATCH_LIMIT` | `200` | Hospitals processed per `POST /api/pipeline/enrich` call |
 | `PROBE_CONCURRENCY` | `10` | Max concurrent probe requests |
 | `PROBE_RATE_LIMIT_PER_SEC` | `5.0` | Global probe rate limit |
 
@@ -558,5 +630,6 @@ These are explicitly **out of scope** for the current phase but are anticipated 
 1. **MRF Metadata Extraction** — Download MRF headers and record SHA-1 hash, `Last-Modified`, `ETag`, `Cache-Control`, `Content-Length`. Tracked in the deferred `mrf_metadata` table.
 2. **MRF Content Validation** — Validate MRF contents against the CMS JSON schema or CSV template. Requires downloading multi-GB files.
 3. **Scheduled Scans** — Recurring cron-based re-probing (weekly/monthly) to track compliance over time.
-4. **Frontend Dashboard** — Web UI for browsing hospitals, viewing compliance maps, and drilling into per-hospital detail.
+4. **Frontend Dashboard** — Web UI for browsing hospitals, viewing compliance maps, and drilling into per-hospital detail. Would be a natural home for the manual-enrichment queue (`GET /api/hospitals/needs-enrichment` + `PATCH .../enrichment`) — a form instead of hand-written `curl` calls.
 5. **PostgreSQL Migration** — All SQL is already PgSQL-compatible. Swap `sqlx` feature flag from `sqlite` to `postgres` and update the connection string.
+6. **Census bulk-batch geocoding** — Wire `CensusProvider::geocode_batch` into the enrichment loop so a full run costs one HTTP call per ~1,000 hospitals instead of one per hospital, rather than only being exercised by its own unit test.

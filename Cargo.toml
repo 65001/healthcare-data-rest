@@ -33,6 +33,11 @@ uuid = { version = "1", features = ["v4", "serde"] }
 dotenvy = "0.15"
 async-trait = "0.1"
 futures = "0.3"
+utoipa = { version = "5", features = ["axum_extras", "chrono"] }
+# Pinned to 8.x (not the latest 9.x) — 9.x's "axum" feature is built
+# against axum 0.8, but this workspace is still on axum 0.7 (see the
+# `axum` entry above); 8.x's SwaggerUi -> Router<S> impl matches 0.7.
+utoipa-swagger-ui = { version = "=8.1.0", features = ["axum"] }
 
 cms-ingest = { path = "cms-ingest" }
 geo-enrich = { path = "geo-enrich" }
