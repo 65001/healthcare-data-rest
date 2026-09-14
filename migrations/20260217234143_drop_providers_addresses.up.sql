@@ -1,2 +1,0 @@
-DROP TABLE IF EXISTS providers;
-DROP TABLE IF EXISTS addresses;
