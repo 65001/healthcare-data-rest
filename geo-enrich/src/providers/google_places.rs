@@ -32,7 +32,11 @@ impl GooglePlacesClient {
     /// `providers::google_maps::GoogleMapsProvider::from_config`), so
     /// callers can `if let Some(client) = GooglePlacesClient::from_config(...)`
     /// and simply skip the fallback step when it isn't configured.
-    pub fn from_config(http: reqwest::Client, enabled: bool, api_key: Option<String>) -> Option<Self> {
+    pub fn from_config(
+        http: reqwest::Client,
+        enabled: bool,
+        api_key: Option<String>,
+    ) -> Option<Self> {
         match (enabled, api_key) {
             (true, Some(api_key)) if !api_key.is_empty() => Some(Self {
                 http,
@@ -45,7 +49,11 @@ impl GooglePlacesClient {
 
     #[cfg(test)]
     fn with_base_url(http: reqwest::Client, base_url: String, api_key: String) -> Self {
-        Self { http, base_url, api_key }
+        Self {
+            http,
+            base_url,
+            api_key,
+        }
     }
 
     /// Looks up a hospital by name + address text and returns its
@@ -149,9 +157,19 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = GooglePlacesClient::with_base_url(reqwest::Client::new(), format!("{}/", server.uri()), "test-key".to_string());
+        let client = GooglePlacesClient::with_base_url(
+            reqwest::Client::new(),
+            format!("{}/", server.uri()),
+            "test-key".to_string(),
+        );
         let website = client
-            .find_website("Cedars-Sinai Medical Center", "8700 Beverly Blvd", "Los Angeles", "CA", "90048")
+            .find_website(
+                "Cedars-Sinai Medical Center",
+                "8700 Beverly Blvd",
+                "Los Angeles",
+                "CA",
+                "90048",
+            )
             .await
             .unwrap();
 
@@ -167,8 +185,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = GooglePlacesClient::with_base_url(reqwest::Client::new(), format!("{}/", server.uri()), "test-key".to_string());
-        let website = client.find_website("Nobody Hospital", "1 Nowhere Rd", "Nowhere", "ZZ", "00000").await.unwrap();
+        let client = GooglePlacesClient::with_base_url(
+            reqwest::Client::new(),
+            format!("{}/", server.uri()),
+            "test-key".to_string(),
+        );
+        let website = client
+            .find_website("Nobody Hospital", "1 Nowhere Rd", "Nowhere", "ZZ", "00000")
+            .await
+            .unwrap();
         assert_eq!(website, None);
     }
 
@@ -181,20 +206,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = GooglePlacesClient::with_base_url(reqwest::Client::new(), format!("{}/", server.uri()), "test-key".to_string());
-        let err = client.find_website("x", "y", "z", "s", "0").await.unwrap_err();
+        let client = GooglePlacesClient::with_base_url(
+            reqwest::Client::new(),
+            format!("{}/", server.uri()),
+            "test-key".to_string(),
+        );
+        let err = client
+            .find_website("x", "y", "z", "s", "0")
+            .await
+            .unwrap_err();
         assert!(matches!(err, GeoEnrichError::RateLimited { .. }));
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn live_places_test() {
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .unwrap();
-        let client = GooglePlacesClient::from_config(http, true, Some("AIzaSyCO9Hf-YsMMTSFfKmVqylVoJZtyhBBgJKA".into())).unwrap();
-        let res = client.find_website("SOUTHEAST HEALTH MEDICAL CENTER", "1108 ROSS CLARK CIRCLE", "DOTHAN", "AL", "36301").await;
-        println!("LIVE PLACES RES: {:?}", res);
     }
 }
