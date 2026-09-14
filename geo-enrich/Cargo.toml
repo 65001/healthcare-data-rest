@@ -9,7 +9,11 @@ license.workspace = true
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["multipart"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
+
+[dev-dependencies]
+wiremock = "0.6"
+serde_json = { workspace = true }

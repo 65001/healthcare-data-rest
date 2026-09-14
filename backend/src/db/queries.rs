@@ -213,3 +213,93 @@ pub async fn status_counts_by_state(pool: &SqlitePool) -> Result<Vec<StatusCount
         })
         .collect())
 }
+
+/// Up to `limit` hospitals with `enriched_at IS NULL`, for
+/// `enrich_store::HospitalStore::list_unenriched`. Returned as plain
+/// tuples rather than a `FromRow` struct on purpose — the shape here
+/// belongs to `geo_enrich::enricher::EnrichmentTarget`, defined in a
+/// crate this one depends on (not the reverse), so it can't derive
+/// `sqlx::FromRow` (that would pull `sqlx` into `geo-enrich`, which is
+/// meant to stay database-agnostic — see that crate's `enricher.rs`).
+pub async fn list_unenriched_hospitals(
+    pool: &SqlitePool,
+    limit: u32,
+) -> Result<Vec<(String, String, String, String, String, String)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT facility_id, facility_name, address, city, state, zip_code \
+         FROM hospitals WHERE enriched_at IS NULL LIMIT ?",
+    )
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await
+}
+
+/// One hospital's geocode result, in the shape `save_enrichment` needs:
+/// `(provider, latitude, longitude, formatted_address, confidence)`.
+pub type GeocodeRow<'a> = (&'a str, f64, f64, Option<&'a str>, Option<f64>);
+
+/// Persists one enrichment outcome. `geocode: None` means no provider
+/// could resolve this address — `enriched_at` is still stamped (so this
+/// hospital isn't re-attempted on every future enrich run, per
+/// Architecture.md's "skips hospitals that already have `enriched_at`
+/// set"), but `latitude`/`longitude`/etc. are left untouched (`NULL` on
+/// a first run). `website_url: None` leaves any existing value alone
+/// (`COALESCE`) rather than clobbering a previously-found website with
+/// nothing.
+pub async fn save_enrichment(
+    pool: &SqlitePool,
+    facility_id: &str,
+    geocode: Option<GeocodeRow<'_>>,
+    website_url: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    let now = Utc::now().to_rfc3339();
+
+    match geocode {
+        Some((provider, lat, lon, formatted_address, confidence)) => {
+            sqlx::query(
+                r#"
+                UPDATE hospitals SET
+                    latitude = ?,
+                    longitude = ?,
+                    formatted_address = ?,
+                    geo_provider = ?,
+                    geo_confidence = ?,
+                    website_url = COALESCE(?, website_url),
+                    enriched_at = ?,
+                    updated_at = ?
+                WHERE facility_id = ?
+                "#,
+            )
+            .bind(lat)
+            .bind(lon)
+            .bind(formatted_address)
+            .bind(provider)
+            .bind(confidence)
+            .bind(website_url)
+            .bind(&now)
+            .bind(&now)
+            .bind(facility_id)
+            .execute(pool)
+            .await?;
+        }
+        None => {
+            sqlx::query(
+                r#"
+                UPDATE hospitals SET
+                    website_url = COALESCE(?, website_url),
+                    enriched_at = ?,
+                    updated_at = ?
+                WHERE facility_id = ?
+                "#,
+            )
+            .bind(website_url)
+            .bind(&now)
+            .bind(&now)
+            .bind(facility_id)
+            .execute(pool)
+            .await?;
+        }
+    }
+
+    Ok(())
+}

@@ -22,6 +22,11 @@ target/
 *.ducklake
 lake/
 
+# SQLite database files
+*.db
+*.db-shm
+*.db-wal
+
 # Environment variables
 .env
 

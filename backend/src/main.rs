@@ -1,5 +1,6 @@
 mod config;
 mod db;
+mod enrich_store;
 mod error;
 mod jobs;
 mod routes;
@@ -17,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Picks up a `.env` file in the working directory if present; falls
     // back silently to real environment variables / built-in defaults
     // otherwise (see config.rs).
-    dotenvy::dotenv().ok();
+    dotenvy::dotenv_override().ok();
 
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))

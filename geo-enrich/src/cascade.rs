@@ -76,6 +76,7 @@ mod tests {
                 longitude: 2.0,
                 formatted_address: None,
                 confidence: None,
+                website_url: None,
             }))
         }
     }

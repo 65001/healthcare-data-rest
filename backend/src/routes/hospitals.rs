@@ -15,9 +15,59 @@ pub struct ListParams {
     pub state: Option<String>,
     pub hospital_type: Option<String>,
     pub discovery_status: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_bool_opt")]
     pub enriched: Option<bool>,
     pub page: Option<u32>,
     pub per_page: Option<u32>,
+}
+
+fn deserialize_bool_opt<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Visitor;
+
+    struct OptBoolVisitor;
+
+    impl<'de> Visitor<'de> for OptBoolVisitor {
+        type Value = Option<bool>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a boolean or boolean-like string (true/false/1/0)")
+        }
+
+        fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            match v.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" | "" => Ok(Some(true)),
+                "false" | "0" | "no" => Ok(Some(false)),
+                _ => Err(serde::de::Error::custom(format!("invalid boolean: {v}"))),
+            }
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_any(self)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+    }
+
+    deserializer.deserialize_option(OptBoolVisitor)
 }
 
 #[derive(Debug, Serialize)]

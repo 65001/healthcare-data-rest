@@ -1,26 +1,24 @@
-//! Stage 2 of the pipeline: cascading geocoding.
+//! Stage 2 of the pipeline: cascading geocoding, plus website discovery.
 //!
-//! **Status: skeleton.** The [`GeocodingProvider`] trait, [`GeocodingResult`],
-//! and [`crate::cascade::CascadingGeocoder`] orchestrator below are fully
-//! implemented per Architecture.md. The three provider bodies
-//! (`providers::census`, `providers::nominatim`, `providers::google_maps`)
-//! and the batch `enricher` loop are stubs that compile and document what
-//! they need — see each module's doc comment and IMPLEMENTATION_NOTES.md
-//! for the plan. This crate is not wired into `backend` yet: the
-//! `POST /api/pipeline/enrich` route returns 501 until it is.
+//! **Status, this pass:**
+//! - `providers::nominatim` — **fully implemented.** Geocodes via the
+//!   public Nominatim instance, self-throttled to 1 req/sec per its usage
+//!   policy, and opportunistically reads a website out of OSM's
+//!   `extratags` when the tag is present.
+//! - `providers::google_places` — **fully implemented.** A dedicated
+//!   website lookup (Places API (New), Text Search), used as the fallback
+//!   when Nominatim didn't turn up a website. Separate from
+//!   `providers::google_maps` (Maps *Geocoding*, a different API/key) —
+//!   don't conflate the two.
+//! - `providers::census` and `providers::google_maps` — still stubs. Not
+//!   part of this pass; see their doc comments.
+//! - `enricher` — implemented: bounded-concurrency batch loop wiring the
+//!   cascade + Places fallback together against a small `UnenrichedHospitalStore`
+//!   trait, so this crate still doesn't depend on `backend`/`sqlx` directly
+//!   (Architecture.md's dependency graph stays one-directional).
 //!
-//! Two decisions from the project owner that the next implementation pass
-//! should follow:
-//! - Google Maps geocoding: implement fully, but leave
-//!   `GEOCODING_GOOGLE_MAPS_ENABLED=false` by default (no key configured
-//!   yet).
-//! - Website URL discovery: Architecture.md's plan to pull `website_url`
-//!   out of geocoder "map/place data" doesn't hold up — Census and
-//!   Nominatim's geocoding endpoints don't reliably return a business
-//!   website. The decision was to add a dedicated Google **Places** API
-//!   lookup for this (a different API/key from Google Maps Geocoding),
-//!   as its own step, rather than trying to scrape it out of the geocode
-//!   response. That step isn't implemented in this pass either.
+//! `backend`'s `POST /api/pipeline/enrich` route now runs this for real —
+//! see `backend/src/routes/pipeline.rs` and `backend/src/enrich_store.rs`.
 
 pub mod cascade;
 pub mod enricher;
@@ -38,6 +36,12 @@ pub struct GeocodingResult {
     pub formatted_address: Option<String>,
     /// Best-effort confidence score in `[0, 1]`, when the provider gives one.
     pub confidence: Option<f64>,
+    /// Best-effort website URL, when the provider's response happened to
+    /// carry one (Nominatim's OSM `extratags`, e.g.). `None` from
+    /// providers that don't supply this (Census) or when it just wasn't
+    /// tagged. This is opportunistic only — `providers::google_places` is
+    /// the dedicated fallback for when this comes back `None`.
+    pub website_url: Option<String>,
 }
 
 /// A single provider in the geocoding cascade.
