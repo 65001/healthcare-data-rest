@@ -51,6 +51,11 @@ export interface MrfDiscovery {
   cms_hpt_txt_found: boolean | null
   cms_hpt_txt_url: string | null
   mrf_urls: string | null
+  // From the manifest entry's contact-name/contact-email fields — part of
+  // CMS's cms-hpt.txt spec, not persisted until this column was added
+  // (2026-09-15).
+  contact_name: string | null
+  contact_email: string | null
   discovery_status: string
   checked_at: string
 }
@@ -58,6 +63,51 @@ export interface MrfDiscovery {
 // GET /api/hospitals/:id flattens `Hospital`'s fields onto the response
 // object (`#[serde(flatten)]`) alongside `latest_discovery`.
 export type HospitalDetail = Hospital & { latest_discovery: MrfDiscovery | null }
+
+// One row of GET /api/mrf-discoveries/:id/metadata — a single
+// conditional-caching probe of one MRF URL. `change_detection_method` is
+// null only when the URL was unreachable that check; `changed_from_previous`
+// is additionally null for the first ("baseline") row, since there's
+// nothing yet to compare against.
+export interface MrfMetadata {
+  id: string
+  mrf_discovery_id: string
+  mrf_url: string
+  sha1_hash: string | null
+  last_modified: string | null
+  etag: string | null
+  cache_control: string | null
+  content_length: number | null
+  content_type: string | null
+  schema_valid: boolean | null
+  change_detection_method: 'baseline' | 'etag' | 'last_modified' | 'sha1' | null
+  changed_from_previous: boolean | null
+  checked_at: string
+}
+
+// One row of GET /api/hospitals/:id/ownership's `owners` array — a
+// disclosed owner or controller from CMS's PECOS ownership data.
+// `owner_type` is `"O"` (organization) or `"I"` (individual); the
+// corresponding name field is set accordingly.
+export interface HospitalOwner {
+  enrollment_id: string
+  owner_type: string | null
+  owner_role_text: string | null
+  owner_organization_name: string | null
+  owner_person_name: string | null
+  percentage_ownership: string | null
+}
+
+// GET /api/hospitals/:id/ownership. `no_stake_expected` is the backend's
+// call (backend/src/db/queries.rs's NO_PECOS_STAKE_OWNERSHIP_CATEGORIES)
+// on whether an empty `owners` list is normal for this hospital's
+// ownership category (e.g. Department of Defense) rather than a sign
+// ownership data needs ingesting — the frontend has no copy of that list
+// and shouldn't grow one; always defer to this field.
+export interface HospitalOwnershipResponse {
+  owners: HospitalOwner[]
+  no_stake_expected: boolean
+}
 
 export interface NeedsEnrichmentItem {
   facility_id: string
@@ -101,6 +151,15 @@ export interface NeedsEnrichmentParams {
   state?: string
   page?: number
   per_page?: number
+}
+
+// Body for POST /api/pipeline/discover. Unset network_manifest_url runs
+// the per-hospital-website mode (probe every hospital with a website on
+// its own site); set it to run the network-manifest mode instead.
+export interface DiscoverRequest {
+  network_manifest_url?: string
+  state?: string
+  facility_ids?: string[]
 }
 
 export interface ManualEnrichmentRequest {

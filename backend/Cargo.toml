@@ -25,6 +25,8 @@ async-trait = { workspace = true }
 reqwest = { workspace = true }
 utoipa = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
+strsim = { workspace = true }
+futures = { workspace = true }
 
 cms-ingest = { workspace = true }
 geo-enrich = { workspace = true }
@@ -32,3 +34,4 @@ compliance-probe = { workspace = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+wiremock = "0.6"

@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { api } from '../lib/api'
+import type { DiscoverRequest } from '../lib/types'
 
 /** Polls GET /api/pipeline/jobs/:id every second while the job is
  * pending/running; stops once it lands on completed/failed. Jobs are
@@ -45,4 +46,18 @@ export function useTriggerIngest() {
 
 export function useTriggerEnrich(retryIncomplete: boolean) {
   return usePipelineTrigger(() => api.triggerEnrich(retryIncomplete))
+}
+
+export function useTriggerIngestOwnership() {
+  return usePipelineTrigger(api.triggerIngestOwnership)
+}
+
+/** Runs POST /api/pipeline/discover with the given body. An unset
+ * `network_manifest_url` selects the per-hospital-website mode — pass
+ * `{}` to probe every hospital with a website on file, or narrow with
+ * `state`/`facility_ids`. For one specific hospital, prefer
+ * `useDiscoverHospital` in useHospitals.ts instead, which also refreshes
+ * that hospital's detail view on completion. */
+export function useTriggerDiscover(body: DiscoverRequest) {
+  return usePipelineTrigger(() => api.triggerDiscover(body))
 }

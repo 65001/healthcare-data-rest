@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { HospitalsTable } from '../components/HospitalsTable'
 import { Pagination } from '../components/Pagination'
+import { TableSkeleton } from '../components/Skeleton'
 import { useHospitals } from '../hooks/useHospitals'
 import { US_STATES } from '../lib/usStates'
 import type { ListParams } from '../lib/types'
@@ -34,19 +35,19 @@ export function HospitalsPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h2 className="text-base font-semibold text-slate-900">All hospitals</h2>
-        <p className="mt-1 text-sm text-slate-500">
+        <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">All hospitals</h2>
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
           Browse the full CMS dataset with its latest MRF discovery status joined in.
         </p>
       </div>
 
-      <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3">
+      <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
         <label className="flex items-center gap-2 text-sm">
-          <span className="text-slate-600">State</span>
+          <span className="text-slate-600 dark:text-slate-400">State</span>
           <select
             value={state}
             onChange={(e) => updateFilter(() => setState(e.target.value))}
-            className="rounded-md border border-slate-300 px-2 py-1"
+            className="rounded-md border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
           >
             <option value="">All states</option>
             {US_STATES.map((s) => (
@@ -58,11 +59,11 @@ export function HospitalsPage() {
         </label>
 
         <label className="flex items-center gap-2 text-sm">
-          <span className="text-slate-600">MRF status</span>
+          <span className="text-slate-600 dark:text-slate-400">MRF status</span>
           <select
             value={discoveryStatus}
             onChange={(e) => updateFilter(() => setDiscoveryStatus(e.target.value))}
-            className="rounded-md border border-slate-300 px-2 py-1"
+            className="rounded-md border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
           >
             <option value="">Any</option>
             <option value="mrf_found">MRF found</option>
@@ -74,11 +75,11 @@ export function HospitalsPage() {
         </label>
 
         <label className="flex items-center gap-2 text-sm">
-          <span className="text-slate-600">Enrichment</span>
+          <span className="text-slate-600 dark:text-slate-400">Enrichment</span>
           <select
             value={enriched}
             onChange={(e) => updateFilter(() => setEnriched(e.target.value))}
-            className="rounded-md border border-slate-300 px-2 py-1"
+            className="rounded-md border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
           >
             {ENRICHED_OPTIONS.map((opt) => (
               <option key={opt.value} value={opt.value}>
@@ -88,11 +89,12 @@ export function HospitalsPage() {
           </select>
         </label>
 
-        {isFetching && <span className="text-xs text-slate-400">Refreshing…</span>}
+        {isFetching && <span className="text-xs text-slate-400 dark:text-slate-500">Refreshing…</span>}
       </div>
 
-      {isLoading && <p className="text-sm text-slate-500">Loading hospitals…</p>}
-      {error && <p className="text-sm text-red-600">{error.message}</p>}
+      {error && <p className="text-sm text-red-600 dark:text-red-400">{error.message}</p>}
+
+      {isLoading && <TableSkeleton columns={6} />}
 
       {data && (
         <>

@@ -31,9 +31,6 @@ pub enum ApiError {
     #[error("{0}")]
     BadRequest(String),
 
-    #[error("{stage} is not implemented yet: {detail}")]
-    NotImplemented { stage: &'static str, detail: String },
-
     #[error("CMS ingest failed: {0}")]
     Ingest(#[from] cms_ingest::IngestError),
 }
@@ -44,7 +41,6 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
-            ApiError::NotImplemented { .. } => StatusCode::NOT_IMPLEMENTED,
             ApiError::Ingest(_) => StatusCode::BAD_GATEWAY,
         };
         let body = Json(json!({ "error": self.to_string() }));

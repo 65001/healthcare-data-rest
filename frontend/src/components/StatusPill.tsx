@@ -1,10 +1,10 @@
 const STYLES: Record<string, string> = {
-  mrf_found: 'bg-emerald-100 text-emerald-800',
-  manifest_only: 'bg-amber-100 text-amber-800',
-  no_manifest: 'bg-orange-100 text-orange-800',
-  website_unreachable: 'bg-red-100 text-red-800',
-  no_website: 'bg-slate-200 text-slate-700',
-  not_checked: 'bg-slate-100 text-slate-500',
+  mrf_found: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300',
+  manifest_only: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300',
+  no_manifest: 'bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300',
+  website_unreachable: 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300',
+  no_website: 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300',
+  not_checked: 'bg-slate-100 text-slate-500 dark:bg-slate-800/60 dark:text-slate-400',
 }
 
 const LABELS: Record<string, string> = {

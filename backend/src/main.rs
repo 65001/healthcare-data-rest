@@ -3,8 +3,11 @@ mod db;
 mod enrich_store;
 mod error;
 mod jobs;
+mod mrf_match;
+mod mrf_metadata;
 mod openapi;
 mod routes;
+mod url_check;
 
 use std::sync::Arc;
 
@@ -30,6 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pool = db::connect(&config.database_url).await?;
     let jobs = JobTracker::new();
+    let http = url_check::http_client()?;
 
     let host = config.server_host.clone();
     let port = config.server_port;
@@ -38,6 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pool,
         config: Arc::new(config),
         jobs,
+        http,
     };
 
     let app = routes::build_router(state);

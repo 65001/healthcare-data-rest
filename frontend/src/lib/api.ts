@@ -1,11 +1,14 @@
 import type {
   ApiErrorBody,
+  DiscoverRequest,
   Hospital,
   HospitalDetail,
+  HospitalOwnershipResponse,
   Job,
   ListParams,
   ListResponse,
   ManualEnrichmentRequest,
+  MrfMetadata,
   NeedsEnrichmentParams,
   NeedsEnrichmentResponse,
   StatsResponse,
@@ -62,6 +65,10 @@ export const api = {
     return request(`/api/hospitals/${encodeURIComponent(facilityId)}`)
   },
 
+  getHospitalOwnership(facilityId: string): Promise<HospitalOwnershipResponse> {
+    return request(`/api/hospitals/${encodeURIComponent(facilityId)}/ownership`)
+  },
+
   needsEnrichment(params: NeedsEnrichmentParams): Promise<NeedsEnrichmentResponse> {
     return request(`/api/hospitals/needs-enrichment${buildQuery(params)}`)
   },
@@ -87,7 +94,28 @@ export const api = {
     })
   },
 
+  triggerIngestOwnership(): Promise<Job> {
+    return request('/api/pipeline/ingest-ownership', { method: 'POST' })
+  },
+
+  triggerDiscover(body: DiscoverRequest): Promise<Job> {
+    return request('/api/pipeline/discover', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+  },
+
   getJob(id: string): Promise<Job> {
     return request(`/api/pipeline/jobs/${encodeURIComponent(id)}`)
+  },
+
+  getMrfMetadata(discoveryId: string): Promise<MrfMetadata[]> {
+    return request(`/api/mrf-discoveries/${encodeURIComponent(discoveryId)}/metadata`)
+  },
+
+  recheckMrfMetadata(discoveryId: string): Promise<Job> {
+    return request(`/api/mrf-discoveries/${encodeURIComponent(discoveryId)}/metadata/recheck`, {
+      method: 'POST',
+    })
   },
 }

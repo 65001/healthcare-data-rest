@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { EnrichmentQueueTable } from '../components/EnrichmentQueueTable'
 import { Pagination } from '../components/Pagination'
+import { TableSkeleton } from '../components/Skeleton'
 import { useNeedsEnrichment } from '../hooks/useHospitals'
 import { US_STATES } from '../lib/usStates'
 import type { NeedsEnrichmentParams } from '../lib/types'
@@ -26,16 +27,22 @@ export function QueuePage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h2 className="text-base font-semibold text-slate-900">Manual enrichment queue</h2>
-        <p className="mt-1 text-sm text-slate-500">
+        <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+          Manual enrichment queue
+        </h2>
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
           Hospitals the automated pipeline already ran on but couldn't fully resolve. Fill in
-          coordinates and/or a website by hand — saving stamps <code className="rounded bg-slate-100 px-1 py-0.5 text-xs">geo_provider = "manual"</code>.
+          coordinates and/or a website by hand — saving stamps{' '}
+          <code className="rounded bg-slate-100 px-1 py-0.5 text-xs dark:bg-slate-800">
+            geo_provider = "manual"
+          </code>
+          .
         </p>
       </div>
 
-      <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3">
+      <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
         <label className="flex items-center gap-2 text-sm">
-          <span className="text-slate-600">Missing</span>
+          <span className="text-slate-600 dark:text-slate-400">Missing</span>
           <select
             value={missing ?? ''}
             onChange={(e) =>
@@ -43,7 +50,7 @@ export function QueuePage() {
                 setMissing((e.target.value || undefined) as NeedsEnrichmentParams['missing']),
               )
             }
-            className="rounded-md border border-slate-300 px-2 py-1"
+            className="rounded-md border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
           >
             <option value="">Either</option>
             <option value="coordinates">Coordinates</option>
@@ -52,11 +59,11 @@ export function QueuePage() {
         </label>
 
         <label className="flex items-center gap-2 text-sm">
-          <span className="text-slate-600">State</span>
+          <span className="text-slate-600 dark:text-slate-400">State</span>
           <select
             value={state}
             onChange={(e) => updateFilter(() => setState(e.target.value))}
-            className="rounded-md border border-slate-300 px-2 py-1"
+            className="rounded-md border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
           >
             <option value="">All states</option>
             {US_STATES.map((s) => (
@@ -67,11 +74,12 @@ export function QueuePage() {
           </select>
         </label>
 
-        {isFetching && <span className="text-xs text-slate-400">Refreshing…</span>}
+        {isFetching && <span className="text-xs text-slate-400 dark:text-slate-500">Refreshing…</span>}
       </div>
 
-      {isLoading && <p className="text-sm text-slate-500">Loading queue…</p>}
-      {error && <p className="text-sm text-red-600">{error.message}</p>}
+      {error && <p className="text-sm text-red-600 dark:text-red-400">{error.message}</p>}
+
+      {isLoading && <TableSkeleton columns={4} />}
 
       {data && (
         <>

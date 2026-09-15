@@ -4,10 +4,15 @@
 
 pub mod client;
 pub mod error;
+pub mod ownership;
 pub mod parser;
 
 pub use client::{CmsClient, CmsClientConfig, HOSPITAL_GENERAL_INFO_DATASET_ID};
 pub use error::IngestError;
+pub use ownership::{
+    EnrollmentRecord, OwnershipClient, OwnershipClientConfig, OwnershipEdgeRecord, HOSPITAL_ALL_OWNERS_DATASET_ID,
+    HOSPITAL_ENROLLMENTS_DATASET_ID,
+};
 
 /// A single normalized hospital record, ready to be upserted into the
 /// `hospitals` table by the `backend` crate. Field names match

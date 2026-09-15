@@ -1,6 +1,143 @@
 # Implementation notes
 
-First pass written 2026-09-14; second pass (Nominatim + Google Places), pass 2b (governor crate), and pass 3 (Census wired in, Google Maps built, backfill support) all landed the same day. Read this before continuing the build.
+First pass written 2026-09-14; second pass (Nominatim + Google Places), pass 2b (governor crate), and pass 3 (Census wired in, Google Maps built, backfill support) all landed the same day. Pass 4 (2026-09-15) built out manual enrichment, Swagger/OpenAPI docs, and `compliance-probe`'s discover stage for real. Pass 5 (also 2026-09-15) implemented the previously-deferred `mrf_metadata` conditional-caching feature end-to-end, backend and frontend, plus a Dashboard button for `POST /api/pipeline/ingest-ownership`. Pass 6 (also 2026-09-15) added a per-hospital ownership view. Pass 7 (also 2026-09-15) built the general per-hospital-website discover mode, per-hospital/all-hospitals discover UI, and a DoD-specific ownership-reachability rule. Pass 8 (also 2026-09-15) added `mrf_discoveries.contact_name`/`contact_email` tracking and fixed `Prober::probe` to normalize a deep-path `website_url` to its origin before probing. Read this before continuing the build.
+
+## Pass 8 — manifest contact tracking + probe base-URL normalization (2026-09-15)
+
+Two small, unrelated fixes landed together:
+
+**1. `mrf_discoveries.contact_name`/`contact_email`.** `compliance_probe::manifest_parser::MrfEntry` already parsed `cms-hpt.txt`'s `contact-name`/`contact-email` fields (confirmed live against Sentara's real manifest back in pass 4) but nothing persisted them — silently dropped at the `insert_mrf_discovery`/`insert_discovery_result` call sites. Added the two columns (`migrations/0004_mrf_discovery_contact.sql`, plain nullable `ALTER TABLE ADD COLUMN`s) and threaded the values through both discover modes: network-manifest mode takes them straight off the matched `MrfEntry`; per-hospital-website mode takes the first manifest entry's contact (a hospital's own `cms-hpt.txt` normally has exactly one entry). Frontend shows it as "Manifest contact: Casey Simpkins <payerdropbox@sentara.com>" (mailto-linked) under "Latest MRF discovery". **Verified live against real Sentara data twice** — once against a temporary copy of `data.db` while the real one was locked (see below), once for real after the lock cleared.
+
+**2. `Prober::probe` now normalizes `website_url` to its origin *before* the reachability `HEAD`, not after.** The project owner flagged a real failure mode with a concrete example: `hospitals.website_url` is often sourced from a geocoding provider (Nominatim/Google Places) that can return a specific location-profile subpage rather than the site root — e.g. `https://www.valleyhealthlink.com/our-locations/profile/warren-memorial-hospital`. The old code HEADed that exact path first and only computed the origin *afterward* (for the `/cms-hpt.txt` URL) — so a deep path that 404s under a plain `HEAD` on a JS-routed site (common; the path exists client-side-only) incorrectly marked the whole hospital `WebsiteUnreachable` before discovery ever got to try `/cms-hpt.txt`, even though the site was completely up. Fixed by extracting the existing origin-computation logic (previously only used after the HEAD) into a `base_url()` helper and calling it *first*, so both the reachability check and the manifest URL now target the origin. New tests reproduce the exact failure mode (root mocked reachable, deep path never mocked — would 404 if probed as-is) and confirm it now succeeds.
+
+**Non-code detour worth recording:** the real `data.db` got stuck under a persistent OS-level exclusive lock mid-pass (rename failed, no `backend.exe`/`cargo` process held it per `tasklist`) — eventually traced to something on the project owner's machine outside this session's control (closing VS Code didn't clear it; it cleared on its own between retries). Worked around by verifying pass 7's contact-tracking feature against a temporary copy of `data.db` in the scratchpad rather than blocking all progress on an external lock — a reasonable pattern if this recurs: copy the real DB, point a scratch backend instance at the copy on an isolated port, verify, then retry the real restart once free.
+
+`cargo test -p backend` (35 tests) and `cargo test -p compliance-probe` (29 tests, 4 new) both pass; `cargo check --workspace` clean. Real `backend`/`frontend` dev servers rebuilt and restarted to pick up both fixes.
+
+## Pass 7 — general discover mode, discover UI, and the DoD ownership special case (2026-09-15)
+
+Three related asks landed this pass:
+
+**1. The general per-hospital-website discover mode, finally built.** `POST /api/pipeline/discover` without `network_manifest_url` used to return `501` — Architecture.md's pipeline diagram always described this mode (probe every hospital's own `website_url` for its own `cms-hpt.txt`), but only the network-manifest mode had ever been implemented. `compliance_probe::probe::Prober::probe` already did the real work per-hospital; it just wasn't wired into a job that iterates hospitals. Now it is: `db::queries::list_discoverable_hospitals` (website_url IS NOT NULL, optionally state/facility_ids-filtered) feeds a `futures::stream::buffer_unordered(config.probe_concurrency)` — **`Config.probe_concurrency` was dead code until this pass**, flagged as a known gap in pass 4's notes; this is what it was for. `db::queries::insert_discovery_result` records *every* probed hospital's outcome (found, unreachable, no manifest — all legitimate, none of them job failures), and an `mrf_metadata` baseline is captured for every MRF URL found, same as the network-manifest mode. `trigger_discover`'s huge single function got split into `run_network_manifest_discover`/`run_per_hospital_discover` to keep each mode's logic separate and readable. `ApiError::NotImplemented` is now genuinely dead (nothing returns `501` from this endpoint anymore) and was removed rather than left as unreachable cruft.
+
+**2. Discover UI, frontend.** Dashboard gained "Run MRF discovery (all hospitals)" (per-hospital-website mode, no filters — behind a `window.confirm` since it can touch thousands of hospitals under one shared rate limit and take a long time) and the hospital detail page gained a per-hospital "Discover" button (`facility_ids: [this one]`, disabled when the hospital has no `website_url`) next to "Latest MRF discovery" — `useDiscoverHospital` in `useHospitals.ts` polls the job and invalidates that hospital's query on completion so a newly found discovery shows up live. **Verified live** against a real hospital (SOUTHEAST HEALTH MEDICAL CENTER, 010001): clicking Discover found its real `cms-hpt.txt` and a real 45.7MB MRF file with real `ETag`/`Last-Modified` headers, and both the discovery card and the MRF-metadata history panel updated without a manual refresh.
+
+**3. Department of Defense ownership special case — and why it ended up as *two* lists, not one.** The project owner noted that DoD-owned hospitals (`hospitals.hospital_ownership = "Department of Defense"`, 32 real rows) will always have an empty PECOS ownership disclosure — there's no private ownership stake for a federal facility to disclose — so `ownership_reachable_ccns`'s normal walk would always yield just `{seed_ccn}` alone for them, meaning a DoD network-manifest discover could never ownership-corroborate any match. First fix: a single `NO_PECOS_STAKE_OWNERSHIP_CATEGORIES` const (`["Department of Defense"]`) used both by `ownership_reachable_ccns` (blanket-connect hospitals sharing the category) and by a new `GET /api/hospitals/{id}/ownership` field (`no_stake_expected`, telling the frontend an empty owner list is expected, not missing data). When the project owner asked for "the same thing" for `"Government - Hospital District or Authority"`, that category turned out to cover ~500 real, *independent* local hospital districts (confirmed via the real DB) — correct for the "is this empty list expected" question, but blanket-connecting all 500 in the reachability graph would reintroduce exactly the false-positive cross-hospital linking that mechanism exists to prevent. The two questions the one const was answering aren't the same question. **Split into two**, both in `db/queries.rs` with doc comments cross-referencing each other: `OWNERSHIP_GRAPH_UNIFIED_CATEGORIES` stays narrow (`["Department of Defense"]` only — reachability graph, high stakes if wrong) and `ownership_category_has_no_pecos_stake()` is broader (Department of Defense *or* any `"Government - *"` prefix — `no_stake_expected` only, low stakes if wrong, just a slightly-off UI hint).
+
+`GET /api/hospitals/{id}/ownership` returns `{owners: [...], no_stake_expected: bool}` instead of a bare array — computed backend-side specifically so the frontend never needs its own copy of the category list; the project owner explicitly asked for this after an initial pass hardcoded the category in `OwnershipPanel.tsx` and pointed out more categories will likely be added later (this is also exactly why splitting the list mattered: extending `ownership_category_has_no_pecos_stake` later must never accidentally also widen the reachability graph). `OwnershipPanel.tsx` shows a distinct, non-actionable message for `no_stake_expected` hospitals instead of the "go run ownership ingest" nudge.
+
+`cargo test -p backend` (35 tests, all passing, 8 new this pass) and `cargo check --workspace` both clean; `tsc --noEmit` clean. Real `backend`/`frontend` dev servers rebuilt and restarted three times this pass to pick up changes, most recently to verify `010001` (a real "Government - Hospital District or Authority" hospital) shows `no_stake_expected: true` while staying reachability-isolated from every other district hospital.
+
+## Pass 6 — per-hospital ownership view (2026-09-15)
+
+The project owner asked whether a hospital's ownership/percentages were visible from its detail page — they weren't; `hospital_enrollments`/`hospital_ownership_edges` existed only as an internal graph `routes::pipeline::trigger_discover` walks for cross-validation (`db::queries::ownership_reachable_ccns`), with no way to read one hospital's disclosed owners directly.
+
+- **`db::queries::list_hospital_owners(pool, facility_id)`** (new): joins `hospital_enrollments` (`ccn = facility_id`) to `hospital_ownership_edges` (`enrollment_id`), organizations sorted before individuals then by name. Empty (not an error) when ownership hasn't been ingested yet or this hospital has no PECOS enrollment/disclosed owner — same "empty is a legitimate outcome" pattern as `ownership_reachable_ccns`.
+- **`GET /api/hospitals/{facility_id}/ownership`** (new, in `routes/hospitals.rs`): `404` only if the hospital itself doesn't exist; an empty list is a normal `200`. Documented via `#[utoipa::path]`, wired into `openapi.rs`.
+- **Frontend**: `OwnershipPanel.tsx` (new component, `useHospitalOwnership` hook) — a table of owner/type/role/percentage, mounted on `HospitalDetailPage.tsx` below the MRF panels. The empty state links back to Dashboard → "Run ownership ingest" (added in pass 5) since that's the most likely reason the list is empty.
+- **Verified against real, live data** (not scratch/seeded this time — the real DB already had ownership data from earlier live testing): `SENTARA RMH MEDICAL CENTER` (490004) correctly shows `SENTARA BLUE RIDGE, LLC` and `SENTARA HEALTH` at 100% plus its individual officers/directors; `RUSSELL COUNTY HOSPITAL` (490002) correctly shows the unrelated `BALLAD HEALTH` / `MOUNTAIN STATES HEALTH ALLIANCE` ownership chain — confirms the join is per-hospital-correct, not just structurally working. `cargo test -p backend` (28 tests, all passing, two new) and `tsc --noEmit` both clean. Real `backend`/`frontend` dev servers rebuilt and restarted to pick up the change.
+
+## Pass 5 — MRF conditional-caching metadata, backend + frontend (2026-09-15)
+
+The project owner asked for the `mrf_metadata` table Architecture.md had sketched but marked deferred: on an MRF discovery, capture cache-relevant response headers (`ETag`, `Last-Modified`, `Cache-Control`, `Content-Length`, `Content-Type`), and use them to tell whether the file changed over time without re-downloading it — falling back to a full download + SHA-1 hash only when the headers alone can't answer that.
+
+- **`compliance-probe/src/probe.rs`** gained `Prober::probe_mrf_headers` (a `HEAD`, capturing the five headers above into `MrfHeaderProbe`) and `Prober::hash_mrf_content` (a streamed `GET` — `bytes_stream()` + incremental `sha1::Sha1` update, never buffers the whole body, since real MRFs can be multi-GB). The pure decision `detect_change_from_headers(previous_etag, previous_last_modified, fresh) -> Option<HeaderChangeCheck>` prefers `ETag` over `Last-Modified` when both are available and returns `None` (headers insufficient) only when neither side has a usable value to compare — that `None` is the caller's signal to fall back to hashing. Needed `reqwest`'s `stream` feature and the `futures`/`sha1` crates added to `compliance-probe/Cargo.toml`.
+- **`backend/src/mrf_metadata.rs`** (new) orchestrates the decision against the database: `check_mrf_metadata(prober, mrf_url, previous: Option<&MrfMetadata>)`. Baseline (`previous = None`) downloads and hashes immediately *only if* neither `ETag` nor `Last-Modified` came back — otherwise there's nothing to gain from paying for a download today, since headers alone will do for the next comparison. A later check against a `previous` row tries headers first, hashes only as the fallback. Database-agnostic (takes `previous` as a plain argument) so it's exercised with `wiremock` in this crate's own tests, no DB needed.
+- **`backend/migrations/0003_mrf_metadata.sql`**: the table as Architecture.md sketched it, plus two columns beyond the original sketch — `change_detection_method` and `changed_from_previous` — needed to actually expose the decision, not just the raw headers.
+- **`routes::pipeline::trigger_discover`** now writes the `mrf_metadata` **baseline** row automatically for every MRF it confirms reachable, right after the `mrf_discoveries` insert (needed `insert_mrf_discovery` to start returning the generated id instead of `()`). **`backend/src/routes/mrf_metadata.rs`** (new) adds `GET /api/mrf-discoveries/{id}/metadata` (history, most recent first) and `POST /api/mrf-discoveries/{id}/metadata/recheck` (re-probe, decide, append — runs as a background job like every other pipeline trigger, since the SHA-1 fallback can mean a large download). Both fully documented via `#[utoipa::path]` and wired into `openapi.rs`'s `ApiDoc` under a new `mrf-metadata` tag.
+- **Frontend**: `MrfMetadataPanel.tsx` (new component) renders the change history as a table (checked-at, a changed/unchanged/baseline/unreachable pill, detection method, ETag, Last-Modified, content type/size, SHA-1) plus a "Recheck now" button; `useMrfMetadata.ts` (new hook) fetches the history and drives the recheck mutation, polling the returned job via the existing `useJob` and invalidating the history query once it completes. Mounted into `HospitalDetailPage.tsx` under the existing "Latest MRF discovery" card, whenever a discovery exists.
+- **Verified live**: a scratch backend (isolated SQLite DB, isolated port, run from a scratchpad `cwd` so `dotenvy` couldn't pick up the real `.env`) was seeded with a hospital, a discovery, and four hand-built `mrf_metadata` rows (baseline → unchanged-via-etag → changed-via-etag → unchanged-via-sha1) to confirm the table/pills render correctly, then "Recheck now" was clicked for real against the seeded (fake, unresolvable) MRF URL — it correctly appended an "Unreachable" row with no method/decision, round-tripping through the real job-polling UI. `cargo test -p backend -p compliance-probe` (51 tests, all passing) and `cargo check --workspace` both clean. Both real dev servers (`backend` on :3000, `frontend` on :5173) were rebuilt and restarted at the end of this pass to pick up the change.
+
+## Pass 4 — manual enrichment, utoipa/Swagger, and a real discover stage (2026-09-15)
+
+Three separate asks landed this pass, in order:
+
+**1. Manual enrichment backend** — `GET /api/hospitals/needs-enrichment` and
+`PATCH /api/hospitals/:facility_id/enrichment` were fully documented in
+Architecture.md (an earlier pass wrote the spec ahead of the code) but not
+implemented. Built per that spec exactly: `db/queries.rs` gained
+`list_needs_enrichment` / `manual_enrich_hospital`; `routes/hospitals.rs`
+gained the two handlers. `PATCH .../enrichment`'s `website_url` also got
+real verification (`backend/src/url_check.rs`, new): a `HEAD` (falling back
+to a capped `GET`) confirms the URL is reachable — required, `400` if not —
+plus non-blocking `content_type`/`content_length`/`looks_like_mrf` info
+returned in the response. `looks_like_mrf` is a lightweight ≤64KB body
+sniff for CMS MRF field-name markers, *not* schema validation (still
+correctly out of scope — see Future Extensions #2).
+
+**2. `utoipa` + Swagger UI** — every route now carries a
+`#[utoipa::path(...)]` annotation and every request/response type derives
+`ToSchema`/`IntoParams`. `backend/src/openapi.rs` aggregates all of it into
+one `OpenApi` doc, served at `/api-docs/openapi.json` with a browsable UI
+at `/swagger-ui` (`utoipa-swagger-ui`, pinned to `8.1.0` — the `9.x` line's
+`axum` feature targets axum 0.8, this workspace is still on 0.7).
+
+**3. `compliance-probe`'s discover stage, for real** — the project owner
+pointed at a live, real-world manifest
+(`https://www.sentara.com/cms-hpt.txt`) and asked for `cms-hpt.txt`
+location-names to be resolved and MRF URLs auto-tagged across a whole
+hospital network. This pinned down the long-open `cms-hpt.txt` wire format
+(see `manifest_parser.rs`'s doc comment — a block format, confirmed
+against that real 18-entry manifest) and drove a full implementation:
+`compliance_probe::probe::Prober` (real HTTP sequence, rate-limited/backed-
+off), `backend::mrf_match` (Jaro-Winkler fuzzy location-name → hospital
+matching, `strsim` crate, threshold `0.90` calibrated against that same
+real manifest cross-checked against CMS's own hospital names), and —
+because name matching alone isn't a safe basis for writing data — a second
+independent signal: `db::queries::ownership_reachable_ccns` walks CMS's own
+ownership-disclosure data (two more datasets, `cms_ingest::ownership`,
+ingested via the new `POST /api/pipeline/ingest-ownership`) to confirm a
+name match is actually the same corporate network before it's persisted.
+`POST /api/pipeline/discover` gained a `network_manifest_url` mode wiring
+all of this together (the general "probe every hospital's own website"
+mode Architecture.md describes is still `501` — out of scope for this
+pass).
+
+**Verified end-to-end against live services**, not just unit tests: a
+real ingest (5,419 hospitals) into a scratch SQLite DB, a real
+`ingest-ownership` run (156,020 rows, ~16s), then a real `discover` call
+against `sentara.com/cms-hpt.txt`. First run: 11/12 real Sentara hospitals
+tagged, one (`Sentara Albemarle`) name-matched (score 0.92) but rejected by
+the ownership check — investigating turned up a genuine design gap, not a
+data problem: Albemarle's controlling owner-of-record in PECOS is
+`"SENTARA HOSPITALS"` (operational/managerial control), while every other
+matched hospital in this manifest lists `"SENTARA HEALTH"` (5%+ direct
+ownership) — two different legal entities within the same real-world
+system. The original design anchored the ownership walk on a single
+(highest-scoring) seed hospital, so it only ever saw one of those two
+owner clusters. Fixed by unioning `ownership_reachable_ccns` across *every*
+name-matched hospital rather than just the top one — costs nothing in
+safety (each seed still independently cleared the name-similarity bar on
+its own merit) and only ever adds legitimate reachable hospitals. Re-run
+after the fix: 12/12 real hospitals tagged, all 6 satellite/outpatient
+manifest entries (no CCN of their own — `Sentara Independence`, `Sentara
+BelleHarbour`, `Sentara Lake Ridge`, `Sentara Port Warwick`, `Hospital for
+Extended Recovery`, an outpatient care center reusing Martha Jefferson's
+MRF) correctly rejected by name matching alone, exactly as designed.
+
+**Dataset ids used** (CMS's `data-api/v1/dataset/{uuid}/data`, confirmed
+live 2026-09-15 — not in Architecture.md's original API notes, which only
+covered the Provider Data Catalog endpoint `cms-ingest/client.rs` uses):
+- Hospital Enrollments: `f6f6505c-e8b0-4d57-b258-e2b94133aaf2`
+- Hospital All Owners: `029c119f-f79c-49be-9100-344d31d10344`
+
+Both were found by fetching `https://data.cms.gov/data.json` (CMS's full
+catalog) and searching titles — the dataset landing pages themselves
+(`data.cms.gov/provider-characteristics/...`) are JS-rendered SPAs that
+resist scraping, same issue as CMS's `cms-hpt.txt` generator tool noted in
+pass 1.
+
+**A process note, not a code one**: this pass accidentally deleted
+`backend/data.db` mid-session (cleanup after a smoke test, without
+checking first whether it held real data) and briefly killed a
+project-owner-run dev server process before realizing it had live
+connections. Neither was malicious, both were avoidable — flagging plainly
+per this file's own stated policy on that. Live smoke-testing after this
+pass onward runs from a scratch `cwd` outside the repo tree (so `dotenvy`
+can't find the real `.env` and silently override a test `DATABASE_URL`/
+`SERVER_PORT` — the actual root cause of the first mistake) and always
+checks `netstat`/established-connections before touching any already-
+running `backend.exe`.
 
 ## Pass 3 — diagnosed a real enrichment run, wired Census in, built Google Maps, added backfill (2026-09-14)
 

@@ -33,6 +33,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 dotenvy = "0.15"
 async-trait = "0.1"
 futures = "0.3"
+strsim = "0.11"
+sha1 = "0.10"
 utoipa = { version = "5", features = ["axum_extras", "chrono"] }
 # Pinned to 8.x (not the latest 9.x) — 9.x's "axum" feature is built
 # against axum 0.8, but this workspace is still on axum 0.7 (see the

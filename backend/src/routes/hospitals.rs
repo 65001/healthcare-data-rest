@@ -8,10 +8,11 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
-use crate::db::models::{Hospital, HospitalListItem, MrfDiscovery, NeedsEnrichmentItem};
+use crate::db::models::{Hospital, HospitalListItem, HospitalOwner, MrfDiscovery, NeedsEnrichmentItem};
 use crate::db::queries::{self, HospitalFilters};
 use crate::error::{ApiError, ErrorResponse};
 use crate::routes::AppState;
+use crate::url_check::{self, UrlCheckResult};
 
 #[derive(Debug, Deserialize, IntoParams)]
 pub struct ListParams {
@@ -125,6 +126,55 @@ pub async fn get_one(
     }))
 }
 
+/// Response for `GET /api/hospitals/:facility_id/ownership`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HospitalOwnershipResponse {
+    pub owners: Vec<HospitalOwner>,
+    /// True when this hospital's `hospital_ownership` category is one
+    /// CMS's PECOS ownership-disclosure data structurally carries no
+    /// owner for (there's no private ownership stake to disclose for a
+    /// federal facility — see
+    /// `db::queries::ownership_category_has_no_pecos_stake`). When this
+    /// is `true`, an empty `owners` list is expected and does **not**
+    /// mean `POST /api/pipeline/ingest-ownership` needs to be run.
+    pub no_stake_expected: bool,
+}
+
+/// Ownership disclosures
+///
+/// Every owner/controller CMS's ownership-disclosure data has on file for
+/// this hospital — organizations before individuals, then by name. Empty
+/// `owners` is not necessarily an error: either
+/// `POST /api/pipeline/ingest-ownership` hasn't been run yet, this
+/// hospital has no PECOS enrollment on file, it has one with no disclosed
+/// owner, or (see `no_stake_expected`) this hospital's ownership category
+/// structurally has no PECOS disclosure at all. This is the same data
+/// `POST /api/pipeline/discover`'s ownership-graph cross-validation uses
+/// internally — this endpoint just exposes it per-hospital instead of
+/// walking it into a reachable-CCN set.
+#[utoipa::path(
+    get,
+    path = "/api/hospitals/{facility_id}/ownership",
+    params(
+        ("facility_id" = String, Path, description = "CMS Certification Number (primary key)"),
+    ),
+    responses(
+        (status = 200, description = "Disclosed owners, possibly empty", body = HospitalOwnershipResponse),
+        (status = 404, description = "No hospital with that facility_id", body = ErrorResponse),
+    ),
+    tag = "hospitals",
+)]
+pub async fn get_ownership(
+    State(state): State<AppState>,
+    Path(facility_id): Path<String>,
+) -> Result<Json<HospitalOwnershipResponse>, ApiError> {
+    let (hospital, _) = queries::get_hospital(&state.pool, &facility_id).await?.ok_or(ApiError::NotFound)?;
+
+    let owners = queries::list_hospital_owners(&state.pool, &facility_id).await?;
+    let no_stake_expected = queries::ownership_category_has_no_pecos_stake(&hospital.hospital_ownership);
+    Ok(Json(HospitalOwnershipResponse { owners, no_stake_expected }))
+}
+
 #[derive(Debug, Deserialize, IntoParams)]
 pub struct NeedsEnrichmentParams {
     /// `"coordinates"` or `"website"`. Anything else is a `400`. Omitted
@@ -210,6 +260,17 @@ pub struct ManualEnrichmentRequest {
     pub website_url: Option<String>,
 }
 
+/// Response for `PATCH /api/hospitals/:facility_id/enrichment`: the
+/// updated hospital row, plus — only when `website_url` was part of the
+/// request — the verification that was run on it.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ManualEnrichmentResponse {
+    #[serde(flatten)]
+    #[schema(inline)]
+    pub hospital: Hospital,
+    pub website_check: Option<UrlCheckResult>,
+}
+
 /// Manual enrichment
 ///
 /// Sets coordinates and/or a website by hand for one hospital — for
@@ -218,11 +279,17 @@ pub struct ManualEnrichmentRequest {
 /// Typically used against the queue `GET /api/hospitals/needs-enrichment`
 /// surfaces. `latitude`/`longitude` must be provided together (not just
 /// one) and in-range; `website_url` must start with `http://` or
-/// `https://`. Whatever's provided **overwrites** the existing value
-/// outright — a manual correction here is assumed intentional. A
-/// successful update stamps `geo_provider = "manual"` and
-/// `geo_confidence = 1.0` when coordinates are set, and sets
-/// `enriched_at` if it wasn't already.
+/// `https://` **and be independently verified to exist** (a `HEAD`,
+/// falling back to a capped `GET`, run inline before saving — see
+/// `url_check`) — an unreachable URL is rejected with `400`. Its content
+/// type, size, and a best-effort guess at whether it looks like a CMS
+/// machine-readable file are returned in `website_check` but never block
+/// the save: `website_url` is a hospital's homepage, not necessarily an
+/// MRF link, so failing that sniff is the expected common case, not an
+/// error. Whatever's provided **overwrites** the existing value outright
+/// — a manual correction here is assumed intentional. A successful
+/// update stamps `geo_provider = "manual"` and `geo_confidence = 1.0`
+/// when coordinates are set, and sets `enriched_at` if it wasn't already.
 #[utoipa::path(
     patch,
     path = "/api/hospitals/{facility_id}/enrichment",
@@ -231,8 +298,8 @@ pub struct ManualEnrichmentRequest {
     ),
     request_body = ManualEnrichmentRequest,
     responses(
-        (status = 200, description = "The updated hospital row", body = Hospital),
-        (status = 400, description = "Validation failure — see the `error` message", body = ErrorResponse),
+        (status = 200, description = "The updated hospital row", body = ManualEnrichmentResponse),
+        (status = 400, description = "Validation failure, or website_url is unreachable — see the `error` message", body = ErrorResponse),
         (status = 404, description = "No hospital with that facility_id", body = ErrorResponse),
     ),
     tag = "hospitals",
@@ -241,7 +308,7 @@ pub async fn patch_enrichment(
     State(state): State<AppState>,
     Path(facility_id): Path<String>,
     Json(body): Json<ManualEnrichmentRequest>,
-) -> Result<Json<Hospital>, ApiError> {
+) -> Result<Json<ManualEnrichmentResponse>, ApiError> {
     if body.latitude.is_none() && body.longitude.is_none() && body.website_url.is_none() {
         return Err(ApiError::BadRequest(
             "at least one of latitude/longitude or website_url must be provided".to_string(),
@@ -265,12 +332,27 @@ pub async fn patch_enrichment(
         (None, None) => {}
     }
 
+    // `website_check` stays `None` unless a website_url was actually
+    // submitted (no URL to verify otherwise).
+    let mut website_check: Option<UrlCheckResult> = None;
+
     if let Some(url) = &body.website_url {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Err(ApiError::BadRequest(
                 "website_url must start with http:// or https://".to_string(),
             ));
         }
+
+        let check = url_check::check_url(&state.http, url).await;
+        if !check.reachable {
+            let reason = check
+                .error
+                .clone()
+                .or_else(|| check.status.map(|s| format!("HTTP {s}")))
+                .unwrap_or_else(|| "unknown error".to_string());
+            return Err(ApiError::BadRequest(format!("website_url is not reachable: {reason}")));
+        }
+        website_check = Some(check);
     }
 
     let rows_affected = queries::manual_enrich_hospital(
@@ -290,5 +372,5 @@ pub async fn patch_enrichment(
         .await?
         .ok_or(ApiError::NotFound)?;
 
-    Ok(Json(hospital))
+    Ok(Json(ManualEnrichmentResponse { hospital, website_check }))
 }

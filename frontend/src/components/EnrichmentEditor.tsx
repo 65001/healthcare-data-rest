@@ -79,8 +79,8 @@ export function EnrichmentEditor({ item }: Props) {
             placeholder="Latitude"
             value={lat}
             onChange={(e) => setLat(e.target.value)}
-            className={`w-28 rounded-md border px-2 py-1 text-sm ${
-              latOk ? 'border-slate-300' : 'border-red-400 bg-red-50'
+            className={`w-28 rounded-md border px-2 py-1 text-sm dark:bg-slate-900 dark:text-slate-100 ${
+              latOk ? 'border-slate-300 dark:border-slate-700' : 'border-red-400 bg-red-50 dark:bg-red-950/40'
             }`}
           />
           <input
@@ -89,15 +89,15 @@ export function EnrichmentEditor({ item }: Props) {
             placeholder="Longitude"
             value={lon}
             onChange={(e) => setLon(e.target.value)}
-            className={`w-28 rounded-md border px-2 py-1 text-sm ${
-              lonOk ? 'border-slate-300' : 'border-red-400 bg-red-50'
+            className={`w-28 rounded-md border px-2 py-1 text-sm dark:bg-slate-900 dark:text-slate-100 ${
+              lonOk ? 'border-slate-300 dark:border-slate-700' : 'border-red-400 bg-red-50 dark:bg-red-950/40'
             }`}
           />
           <a
             href={`https://www.google.com/maps/search/?api=1&query=${mapsQuery}`}
             target="_blank"
             rel="noreferrer"
-            className="whitespace-nowrap text-xs font-medium text-sky-700 hover:underline"
+            className="whitespace-nowrap text-xs font-medium text-sky-700 hover:underline dark:text-sky-400"
           >
             Find on map ↗
           </a>
@@ -109,24 +109,26 @@ export function EnrichmentEditor({ item }: Props) {
           placeholder="https://hospital-website.org"
           value={website}
           onChange={(e) => setWebsite(e.target.value)}
-          className={`w-full rounded-md border px-2 py-1 text-sm ${
-            urlOk ? 'border-slate-300' : 'border-red-400 bg-red-50'
+          className={`w-full rounded-md border px-2 py-1 text-sm dark:bg-slate-900 dark:text-slate-100 ${
+            urlOk ? 'border-slate-300 dark:border-slate-700' : 'border-red-400 bg-red-50 dark:bg-red-950/40'
           }`}
         />
       )}
 
       {!coordsPaired && (
-        <p className="text-xs text-red-600">Provide both latitude and longitude, or neither.</p>
+        <p className="text-xs text-red-600 dark:text-red-400">
+          Provide both latitude and longitude, or neither.
+        </p>
       )}
-      {error && <p className="text-xs text-red-600">{error.message}</p>}
-      {isSuccess && <p className="text-xs text-emerald-600">Saved.</p>}
+      {error && <p className="text-xs text-red-600 dark:text-red-400">{error.message}</p>}
+      {isSuccess && <p className="text-xs text-emerald-600 dark:text-emerald-400">Saved.</p>}
 
       <div>
         <button
           type="button"
           disabled={!canSave || isPending}
           onClick={handleSave}
-          className="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40 hover:bg-slate-700"
+          className="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
         >
           {isPending ? 'Saving…' : 'Save'}
         </button>

@@ -4,8 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Hospital Enrichment Console</title>
+    <script>
+      // Set .dark before first paint so there's no flash of the wrong
+      // theme — src/hooks/useTheme.ts owns this logic after mount.
+      try {
+        var stored = localStorage.getItem('hospital-console-theme')
+        var dark = stored ? stored === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches
+        document.documentElement.classList.toggle('dark', dark)
+      } catch (e) {}
+    </script>
   </head>
-  <body class="bg-slate-50 text-slate-900">
+  <body class="bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

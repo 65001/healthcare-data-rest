@@ -1,4 +1,5 @@
 pub mod hospitals;
+pub mod mrf_metadata;
 pub mod pipeline;
 pub mod stats;
 
@@ -19,6 +20,10 @@ pub struct AppState {
     pub pool: SqlitePool,
     pub config: Arc<Config>,
     pub jobs: JobTracker,
+    /// Shared client for `url_check`'s manual-`website_url` verification
+    /// (see `hospitals::patch_enrichment`) — short timeouts, reused
+    /// across requests rather than built fresh each time.
+    pub http: reqwest::Client,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -26,6 +31,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/hospitals", get(hospitals::list))
         .route("/api/hospitals/needs-enrichment", get(hospitals::needs_enrichment))
         .route("/api/hospitals/:facility_id", get(hospitals::get_one))
+        .route("/api/hospitals/:facility_id/ownership", get(hospitals::get_ownership))
         .route(
             "/api/hospitals/:facility_id/enrichment",
             patch(hospitals::patch_enrichment),
@@ -34,7 +40,13 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/pipeline/ingest", post(pipeline::trigger_ingest))
         .route("/api/pipeline/enrich", post(pipeline::trigger_enrich))
         .route("/api/pipeline/discover", post(pipeline::trigger_discover))
+        .route("/api/pipeline/ingest-ownership", post(pipeline::trigger_ingest_ownership))
         .route("/api/pipeline/jobs/:id", get(pipeline::get_job))
+        .route("/api/mrf-discoveries/:id/metadata", get(mrf_metadata::list_metadata))
+        .route(
+            "/api/mrf-discoveries/:id/metadata/recheck",
+            post(mrf_metadata::recheck_metadata),
+        )
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .with_state(state)
 }
